@@ -36,9 +36,9 @@ backend/data/
 
 # --- Tooling outputs ---
 .opencode/
-graphify-out/cache/
-backend/graphify-out/cache/
-frontend/graphify-out/cache/
+graphify-out/
+backend/graphify-out/
+frontend/graphify-out/
 
 # --- OS / editor ---
 .DS_Store
