@@ -1,0 +1,527 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* Minimal Professional Theme */
+@theme {
+  --color-brand: #fbe232;
+  
+  
+
+  /* Base Neutral Palette - Grays */
+  --color-neutral-50: #fafafa;
+  --color-neutral-100: #f5f5f5;
+  --color-neutral-200: #e5e5e5;
+  --color-neutral-300: #d4d4d4;
+  --color-neutral-400: #a3a3a3;
+  --color-neutral-500: #737373;
+  --color-neutral-600: #525252;
+  --color-neutral-700: #404040;
+  --color-neutral-800: #262626;
+  --color-neutral-900: #171717;
+  --color-neutral-950: #0a0a0a;
+
+  /* Primary Accent - Yellow */
+  --color-primary-50: #fffef0;
+  --color-primary-100: #fffbc7;
+  --color-primary-200: #fff591;
+  --color-primary-300: #fbe232;
+  --color-primary-400: #e8cc12;
+  --color-primary-500: #c5a700;
+  --color-primary-600: #9b8200;
+  --color-primary-700: #756200;
+  --color-primary-800: #584a00;
+  --color-primary-900: #3c3200;
+
+  /* Secondary Accent - Black */
+  --color-secondary-50: #fafafa;
+  --color-secondary-100: #f5f5f5;
+  --color-secondary-200: #e5e5e5;
+  --color-secondary-300: #d4d4d4;
+  --color-secondary-400: #a3a3a3;
+  --color-secondary-500: #737373;
+  --color-secondary-600: #525252;
+  --color-secondary-700: #404040;
+  --color-secondary-800: #262626;
+  --color-secondary-900: #010101;
+
+  /* Success */
+  --color-success-500: #10b981;
+  --color-success-600: #059669;
+
+  /* Warning */
+  --color-warning-500: #f59e0b;
+  --color-warning-600: #d97706;
+
+  /* Danger */
+  --color-danger-500: #ef4444;
+  --color-danger-600: #dc2626;
+
+  /* Theme-specific variables — same as modern so missing data-theme still matches */
+  --theme-sidebar-bg: #010101;
+  --theme-sidebar-text: #ffffff;
+  --theme-sidebar-hover: rgba(255, 255, 255, 0.1);
+  --theme-main-bg: #f8f8f6;
+  --theme-main-text: #171717;
+  --theme-panel-bg: #f8f8f6;
+  --theme-panel-text: #171717;
+  --theme-user-bubble-bg: #171717;
+  --theme-user-bubble-text: #ffffff;
+  --theme-ai-bubble-bg: #fffeff;
+  --theme-ai-bubble-text: #171717;
+  --theme-accent: #fbe232;
+  --theme-accent-hover: #e8cc12;
+  --theme-border: rgba(163, 163, 163, 0.3);
+  --theme-card-bg: #fffeff;
+  --theme-active-indicator: #fbe232;
+  --theme-chat-selected-bg: rgba(251, 226, 50, 0.15);
+}
+
+/* Modern Theme (Reference Design) - Switch with data-theme="modern" on <html> */
+html[data-theme="modern"] {
+  --color-brand: #fbe232;
+  
+  /* Theme-specific variables (Modern) */
+  --theme-sidebar-bg: #010101;
+  --theme-sidebar-text: #ffffff;
+  --theme-sidebar-hover: rgba(255, 255, 255, 0.1);
+  --theme-main-bg: #f8f8f6;
+  --theme-main-text: #171717;
+  --theme-panel-bg: #f8f8f6;
+  --theme-panel-text: #171717;
+  --theme-user-bubble-bg: #171717;
+  --theme-user-bubble-text: #ffffff;
+  --theme-ai-bubble-bg: #fffeff;
+  --theme-ai-bubble-text: #171717;
+  --theme-accent: #fbe232;
+  --theme-accent-hover: #e8cc12;
+  --theme-border: rgba(163, 163, 163, 0.3);
+  --theme-card-bg: #fffeff;
+  --theme-active-indicator: #fbe232;
+  --theme-chat-selected-bg: rgba(251, 226, 50, 0.15);
+}
+
+/* Global styles */
+body {
+  /* @apply bg-neutral-950 text-neutral-100; */
+  font-feature-settings: "rlig" 1, "calt" 1;
+}
+
+/* Custom scrollbar (WebKit + Firefox) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #fbe232 #525252;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-600;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-brand;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-brand/90;
+}
+
+/* Glass effect for cards */
+.glass {
+  background: rgba(23, 23, 23, 0.6);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-light {
+  background: rgba(250, 250, 250, 0.4);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.custom-search-input::placeholder {
+  /* You can set any size you need here */
+  font-size: 13px;
+  /* Example: change color too */
+  color: #71717a;
+  /* A neutral-500 shade */
+}
+
+.placeholder-sm::placeholder {
+  /* This is smaller than the standard Tailwind 'text-xs' (12px) */
+  font-size: 10px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+html,
+body {
+  @apply bg-linear-to-b from-[#f8f8f6] to-[#fffeff];
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Modern theme body background */
+html[data-theme="modern"] body {
+  background: var(--theme-main-bg);
+  color: var(--theme-main-text);
+}
+
+/* Theme-aware TabsTrigger active state */
+[data-theme="modern"] [data-state="active"] {
+  background-color: var(--theme-accent) !important;
+  color: #171717 !important;
+}
+
+/* Override for InfoPanel tabs - minimal selection (underline only) */
+[data-theme="modern"] [role="tablist"] [data-state="active"] {
+  background-color: transparent !important;
+  color: #756200 !important;
+}
+
+/* Force white background for InfoPanel content */
+.info-panel-content {
+  background-color: #fffeff !important;
+}
+
+/* Override active state background for TabsContent in InfoPanel */
+[data-theme="modern"] .info-panel-content[data-state="active"] {
+  background-color: #fffeff !important;
+}
+
+[data-theme="modern"] [role="tabpanel"][data-state="active"] {
+  background-color: #fffeff !important;
+}
+
+/* Theme-aware scrollbar */
+html[data-theme="modern"] ::-webkit-scrollbar-thumb {
+  background: var(--theme-accent);
+}
+
+html[data-theme="modern"] ::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+/* Temperature slider styling */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--theme-accent);
+  cursor: pointer;
+  border: 2px solid #ffffff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--theme-accent);
+  cursor: pointer;
+  border: 2px solid #ffffff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 4px;
+}
+
+input[type="range"]::-moz-range-track {
+  height: 8px;
+  border-radius: 4px;
+}
+
+.gradient_bg{
+  @apply bg-linear-to-b from-[#f8f8f6] to-[#fffeff]
+}
+
+@layer utilities {
+  .shadow-top-soft {
+    box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.15);
+  }
+}
+
+
+/*  */
+.divider {
+  position: relative;
+  padding: 16px 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+}
+
+.divider::before,
+.divider:after {
+  content: "";
+  border-bottom: solid 1px #757474;
+  display: inline-block;
+  width: 100%;
+}
+
+.divider::before {
+  margin-right: 16px;
+}
+
+.divider::after {
+  margin-left: 16px;
+}
+
+.divider span {
+  position: relative;
+  z-index: 1;
+  font-size: 14px;
+  display: block;
+  white-space: nowrap;
+}
+
+.center_div [data-radix-scroll-area-viewport] > div{
+  @apply h-full p-5;
+}
+
+.chat_sidebar [data-radix-scroll-area-viewport] > div{
+  @apply block!
+}
+
+/* ContentEditable placeholder */
+[contenteditable][data-placeholder]:empty:before {
+  content: attr(data-placeholder);
+  color: rgba(113, 113, 122, 0.6);
+  pointer-events: none;
+}
+
+/* Chat bubble markdown — inherit theme colors; style tables/code clearly */
+.chat-md {
+  color: inherit;
+  line-height: 1.55;
+  --tw-prose-pre-code: #171717;
+  --tw-prose-pre-bg: #f5f5f5;
+  --tw-prose-code: #171717;
+}
+
+.chat-md :where(p, ul, ol, pre, blockquote, table) {
+  margin-top: 0.65em;
+  margin-bottom: 0.65em;
+}
+
+.chat-md :where(p, ul, ol, pre, blockquote, table):first-child {
+  margin-top: 0;
+}
+
+.chat-md :where(p, ul, ol, pre, blockquote, table):last-child {
+  margin-bottom: 0;
+}
+
+.chat-md :where(h1, h2, h3, h4) {
+  color: inherit;
+  font-weight: 650;
+  line-height: 1.3;
+  margin-top: 1em;
+  margin-bottom: 0.45em;
+}
+
+.chat-md :where(h1) { font-size: 1.2em; }
+.chat-md :where(h2) { font-size: 1.1em; }
+.chat-md :where(h3, h4) { font-size: 1.05em; }
+
+.chat-md :where(h1, h2, h3, h4):first-child {
+  margin-top: 0;
+}
+
+.chat-md :where(ul) {
+  list-style-type: disc;
+  padding-left: 1.25em;
+}
+
+.chat-md :where(ol) {
+  list-style-type: decimal;
+  padding-left: 1.25em;
+}
+
+.chat-md :where(li) {
+  margin-top: 0.2em;
+  margin-bottom: 0.2em;
+}
+
+.chat-md :where(li > ul, li > ol) {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+.chat-md :where(strong) {
+  font-weight: 650;
+  color: inherit;
+}
+
+.chat-md :where(a) {
+  color: var(--theme-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.chat-md :where(code) {
+  font-size: 0.85em;
+  padding: 0.12em 0.35em;
+  border-radius: 0.3em;
+  color: inherit;
+  background-color: rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--theme-border);
+  word-break: break-word;
+}
+
+.chat-md :where(pre) {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  font-size: 0.85em;
+  line-height: 1.5;
+  padding: 0.75em 0.9em;
+  border-radius: 0.5em;
+  color: var(--theme-ai-bubble-text, #171717);
+  background-color: #f5f5f5;
+  border: 1px solid var(--theme-border);
+  opacity: 1;
+}
+
+.chat-md :where(pre code) {
+  padding: 0;
+  border: none;
+  color: inherit;
+  background: transparent;
+  font-size: inherit;
+  word-break: normal;
+}
+
+.chat-md.prose :where(pre),
+.chat-md.prose :where(pre code) {
+  color: var(--theme-ai-bubble-text, #171717);
+  opacity: 1;
+}
+
+.chat-md :where(blockquote) {
+  border-left: 3px solid var(--theme-border);
+  padding-left: 0.85em;
+  opacity: 0.9;
+  font-style: italic;
+}
+
+.chat-md :where(hr) {
+  border: none;
+  border-top: 1px solid var(--theme-border);
+  margin: 0.9em 0;
+}
+
+.chat-md :where(table) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+.chat-md :where(th, td) {
+  border: 1px solid var(--theme-border);
+  padding: 0.4em 0.65em;
+  text-align: left;
+  vertical-align: top;
+}
+
+.chat-md :where(th) {
+  font-weight: 650;
+  background-color: rgba(0, 0, 0, 0.04);
+}
+
+.chat-md :where(tr:nth-child(even) td) {
+  background-color: rgba(0, 0, 0, 0.02);
+}
+
+.custom-loader-frame,
+.custom-loader {
+  display: inline-block;
+  width: 70px;
+  height: 70px;
+  flex-shrink: 0;
+}
+
+.custom-loader {
+  background: #ffa600;
+  border-radius: 50px;
+  -webkit-mask: radial-gradient(circle 31px at 50% calc(100% + 13px), #000 95%, #0000) top 4px left 50%,
+    radial-gradient(circle 31px, #000 95%, #0000) center,
+    radial-gradient(circle 31px at 50% -13px, #000 95%, #0000) bottom 4px left 50%,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  -webkit-mask-repeat: no-repeat;
+  animation: custom-loader-mask 1.5s infinite;
+}
+
+.custom-loader--inline {
+  width: 20px;
+  height: 20px;
+}
+
+.custom-loader--inline .custom-loader {
+  transform: scale(0.2857142857);
+  transform-origin: top left;
+}
+
+.custom-loader--tiny {
+  width: 16px;
+  height: 16px;
+}
+
+.custom-loader--tiny .custom-loader {
+  transform: scale(0.2285714286);
+  transform-origin: top left;
+}
+
+@keyframes custom-loader-mask {
+  0% {
+    -webkit-mask-size: 0 18px, 0 18px, 0 18px, auto;
+  }
+
+  16.67% {
+    -webkit-mask-size: 100% 18px, 0 18px, 0 18px, auto;
+  }
+
+  33.33% {
+    -webkit-mask-size: 100% 18px, 100% 18px, 0 18px, auto;
+  }
+
+  50% {
+    -webkit-mask-size: 100% 18px, 100% 18px, 100% 18px, auto;
+  }
+
+  66.67% {
+    -webkit-mask-size: 0 18px, 100% 18px, 100% 18px, auto;
+  }
+
+  83.33% {
+    -webkit-mask-size: 0 18px, 0 18px, 100% 18px, auto;
+  }
+
+  100% {
+    -webkit-mask-size: 0 18px, 0 18px, 0 18px, auto;
+  }
+}

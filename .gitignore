@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Node / frontend ---
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.tsbuildinfo
+.next/
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+
+# --- Runtime artifacts ---
+backend/logs/
+backend/data/
+
+# --- Tooling outputs ---
+.opencode/
+graphify-out/cache/
+backend/graphify-out/cache/
+frontend/graphify-out/cache/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

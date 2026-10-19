@@ -1,0 +1,46 @@
+# Agent graph & LangChain
+langgraph==1.2.9
+langchain-core==1.4.9
+
+# LLM provider (OpenAI-compatible LiteLLM gateway)
+openai>=1.0.0
+
+# Local embeddings for experience vector store
+sentence-transformers>=3.0.0
+numpy>=1.26.0
+chromadb>=1.0,<2
+
+# Schemas & tool argument validation
+pydantic==2.13.4
+pydantic-settings>=2.0.0
+
+# Internal tools
+requests==2.34.2
+ddgs==9.14.4
+tzlocal==5.4.4
+
+# langgraph-sdk imports websockets.asyncio (requires websockets >= 13)
+websockets>=13.0,<16
+
+# Load BRAVE_SEARCH_API_KEY and other secrets from .env (via src/config.py)
+python-dotenv==1.2.2
+
+# Interactive terminal UI for the CLI mode (main.py --cli)
+rich>=13.0
+prompt-toolkit>=3.0
+
+# Token-efficient structured context for LLM prompts
+toons>=0.7.0
+
+# Postgres storage (users, chats, messages, prefs, memory, mcp) + LangGraph checkpointer
+psycopg[binary]>=3.2.0
+psycopg-pool>=3.2.0
+langgraph-checkpoint-postgres>=2.0.0
+
+# Provides jwt.encode/decode and PyJWTError used by api/core.
+PyJWT>=2.9.0
+fastapi
+mcp>=1.10,<2
+
+# FastAPI app (also listed in api/requirements.txt)
+#   pip install -r api/requirements.txt
