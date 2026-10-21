@@ -11,7 +11,7 @@ from typing import Any
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.shortcuts import checkboxlist_dialog, input_dialog, radiolist_dialog
+from prompt_toolkit.shortcuts import input_dialog, radiolist_dialog
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -22,15 +22,13 @@ from rich.text import Text
 from api.db.postgres import fetch_all
 from api.db.repositories import AgentRepository, McpRepository, PreferencesRepository, SessionRepository, UserRepository
 from src.agent.agent_core import AgentCore, child_runner, default_policy
-from src.agent.edges.routing import AGENT_NODE, CONTEXT_SELECTOR_NODE, OUTPUT_SECURITY_GATE_NODE, SUBAGENT_NODE, TOOL_NODE
+from src.agent.edges.routing import AGENT_NODE, ARMORY_NODE, CONTEXT_SELECTOR_NODE, OUTPUT_SECURITY_GATE_NODE
 from src.agent.subagent_stream import reset_child_callback, reset_subagent_callback, set_child_callback, set_subagent_callback
 from src.agent.token_stream import reset_token_callback, set_token_callback
 from src.agent.token_stream import reset_usage_callback, set_usage_callback
 from src.cli.renderer import TurnRenderer
 from src.cli.theme import THEME
 from src.config import get_settings
-from src.subagents.registry import get_subagents
-from src.tools import INTERNAL_TOOLS
 from src.utils.postgres_checkpointer import list_checkpoints, rewind_config, run_turn
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -111,30 +109,28 @@ def handle_step(renderer: TurnRenderer, step: dict) -> dict | None:
         renderer.planner_decision(
             action=action,
             task=next_step.get("task") or "",
-            name=next_step.get("tool_name") or next_step.get("agent_name") or "",
-            args=next_step.get("tool_args") or {},
+            name=next_step.get("resource_name") or "",
+            args=next_step.get("arguments") or {},
         )
         if action == "finish":
             renderer.final_answer(_latest_answer(updates.get("messages") or []))
-        elif action == "tool":
-            renderer.tool_call(
-                next_step.get("tool_name", ""),
-                next_step.get("tool_args") or {},
-                next_step.get("task", ""),
-            )
-        elif action == "subagent":
-            renderer.subagent_call(next_step.get("agent_name", ""), next_step.get("task", ""))
+        elif action == "armory" and next_step.get("resource_type") == "tool":
+            renderer.tool_call(next_step.get("resource_name", ""), next_step.get("arguments") or {},
+                               next_step.get("task", ""))
+        elif action == "armory":
+            renderer.subagent_call(next_step.get("resource_name", ""), next_step.get("task", ""))
         else:
             renderer.set_status("Thinking...")
-    elif node == TOOL_NODE:
+    elif node == ARMORY_NODE:
         hist = updates.get("execution_history") or []
         entry = hist[-1] if hist else {}
         result = entry.get("result") or {}
         ok = not (isinstance(result, dict) and result.get("success") is False)
-        renderer.tool_result(entry.get("tool_name") or "", ok=ok, error=None if ok else result.get("error"), result=result)
-    elif node == SUBAGENT_NODE:
-        hist = updates.get("execution_history") or []
-        renderer.subagent_done((hist[-1] if hist else {}).get("agent_name") or "")
+        if entry.get("resource_type") == "subagent":
+            renderer.subagent_done(entry.get("resource_name") or "")
+        else:
+            renderer.tool_result(entry.get("resource_name") or "", ok=ok,
+                                 error=None if ok else result.get("error"), result=result)
     elif node == OUTPUT_SECURITY_GATE_NODE:
         renderer.set_status("Running output security checks...")
     elif node == CONTEXT_SELECTOR_NODE:
@@ -195,9 +191,6 @@ def run_turn_interactive(
         runtime = {**(runtime or {}), "agent_id": agent.id.agent_id, "owner_id": owner_id,
                    "policy": agent.policy.as_dict(),
                    "policy_version": agent.policy.version}
-        permitted = agent.policy.armory
-        runtime["enabled_tools"] = permitted["tools"]
-        runtime["enabled_subagents"] = permitted["subagents"]
         trace_token = bind(agent_id=agent.id.agent_id, execution_id=execution_id,
                            owner_id=owner_id, session_id=agent.id.latest_session_id)
         emit("run.lifecycle.start", component="cli")
@@ -258,8 +251,7 @@ def print_banner(console: Console, subtitle: str = "New chat") -> None:
 def print_help(console: Console) -> None:
     rows = [
         ("/new", "start a new chat"), ("/sessions", "open previous chats"),
-        ("/model", "choose model"), ("/tools", "enable or disable tools"),
-        ("/agents", "enable or disable sub-agents"), ("/mcp", "manage MCP connections"),
+        ("/model", "choose model"), ("/mcp", "manage MCP connections"),
         ("/settings", "agent runtime settings"), ("/checkpoints", "list checkpoints"),
         ("/rewind <id>", "resume from checkpoint"), ("/clear", "clear screen"),
         ("/quit", "exit"),
@@ -369,8 +361,6 @@ def _default_runtime(prefs: dict) -> dict[str, Any]:
     saved = prefs.get("agent") or {}
     return {
         "model_id": saved.get("model_id", settings.llm_model_id),
-        "enabled_tools": saved.get("enabled_tools", [t.name for t in INTERNAL_TOOLS]),
-        "enabled_subagents": saved.get("enabled_subagents", [s.name for s in get_subagents()]),
         "confirm_tools": saved.get("confirm_tools", True),
         "verbose": saved.get("verbose", False),
         "max_loops": int(saved.get("max_loops", settings.max_loops)),
@@ -475,18 +465,6 @@ def run_cli() -> None:
                     selected = _choose("Choose model", [(m, m) for m in MODELS])
                     if selected:
                         runtime["model_id"] = selected; _save_runtime(user, runtime)
-                elif name == "tools":
-                    selected = checkboxlist_dialog(title="Tools", text="Space toggles", values=[(t.name, t.name) for t in INTERNAL_TOOLS], default_values=runtime["enabled_tools"]).run()
-                    if selected is not None:
-                        runtime["enabled_tools"] = selected; _save_runtime(user, runtime)
-                elif name == "agents":
-                    agents = get_subagents(user.uid)
-                    if not agents:
-                        console.print("No sub-agents are registered.", style=THEME["muted"])
-                    else:
-                        selected = checkboxlist_dialog(title="Sub-agents", text="Space toggles", values=[(a.name, a.display_name) for a in agents], default_values=runtime["enabled_subagents"]).run()
-                        if selected is not None:
-                            runtime["enabled_subagents"] = selected; _save_runtime(user, runtime)
                 elif name == "mcp":
                     _manage_mcp(console, user)
                 elif name == "settings":

@@ -342,8 +342,6 @@ class ChatRuntimeManager:
             "session_id": agent.id.latest_session_id,
         }
         runtime.update({key: value for key, value in context().items() if value})
-        runtime["enabled_tools"] = agent.policy.armory["tools"]
-        runtime["enabled_subagents"] = agent.policy.armory["subagents"]
         if checkpoint_id is None and session:
             checkpoint_id = session.get("rollback_checkpoint_id")
 
@@ -490,8 +488,6 @@ class ChatRuntimeManager:
             "session_id": agent.id.latest_session_id,
         }
         runtime.update({key: value for key, value in context().items() if value})
-        runtime["enabled_tools"] = agent.policy.armory["tools"]
-        runtime["enabled_subagents"] = agent.policy.armory["subagents"]
 
         writer = ExecutionEventWriter(
             agent_id=agent_id,

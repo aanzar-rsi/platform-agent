@@ -68,7 +68,7 @@ class TestSessionLoggerBind(unittest.TestCase):
                 log_agent_decision(action="tool", tool_name="read_file", reasoning="need file")
                 log_tool("start", tool_name="read_file")
                 log_tool("end", tool_name="read_file", success=True, result={"ok": True})
-                log_route(action="tool", destination="tool_node")
+                log_route(action="armory", destination="armory_node")
                 log_run_end(stopped=False)
                 reset_session_logger(token)
                 self.assertIsNone(get_session_logger())

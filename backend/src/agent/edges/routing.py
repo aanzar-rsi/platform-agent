@@ -5,12 +5,12 @@ from src.agent.state import PlanExecuteState
 AGENT_NODE             = "agent_node"
 INPUT_SECURITY_GATE_NODE = "input_security_gate"
 OUTPUT_SECURITY_GATE_NODE = "output_security_gate"
-TOOL_NODE              = "tool_node"
-SUBAGENT_NODE          = "subagent_node"
+ARMORY_NODE            = "armory_node"
 CHILD_AGENT_NODE       = "child_agent_node"
 COLLECT_CHILD_NODE     = "collect_child"
 CONTEXT_SELECTOR_NODE  = "context_selector"
 HUMAN_INPUT_NODE       = "human_input"
+PLAN_DISPATCHER_NODE   = "plan_dispatcher"
 
 
 def route_from_agent(state: PlanExecuteState) -> str:
@@ -19,10 +19,8 @@ def route_from_agent(state: PlanExecuteState) -> str:
     """
     action = state.get("next_step", {}).get("action", "finish")
 
-    if action == "tool":
-        dest = TOOL_NODE
-    elif action == "subagent":
-        dest = SUBAGENT_NODE
+    if action == "armory":
+        dest = ARMORY_NODE
     elif action == "child_agent":
         dest = CHILD_AGENT_NODE
     elif action == "collect_child":
@@ -53,4 +51,8 @@ def route_from_input_gate(state: PlanExecuteState) -> str:
 
     Reuses the same action->destination mapping as route_from_agent.
     """
+    if state.get("planned_phases"):
+        return PLAN_DISPATCHER_NODE
+    if state.get("next_step", {}).get("action") == "replan":
+        return AGENT_NODE
     return route_from_agent(state)

@@ -82,7 +82,8 @@ class TestHandleStep(unittest.TestCase):
         renderer = TurnRenderer(make_console(), live=False)
         step = {
             "agent_node": {
-                "next_step": {"action": "tool", "tool_name": "web_search", "tool_args": {"query": "x"}}
+                "next_step": {"action": "armory", "resource_type": "tool",
+                              "resource_name": "web_search", "arguments": {"query": "x"}}
             }
         }
         handle_step(renderer, step)
@@ -91,7 +92,8 @@ class TestHandleStep(unittest.TestCase):
     def test_tool_result_success(self):
         renderer = TurnRenderer(make_console(), live=False)
         renderer.tool_call("web_search", {"query": "x"}, "Find x")
-        step = {"tool_node": {"execution_history": [{"tool_name": "web_search", "result": {"success": True}}]}}
+        step = {"armory_node": {"execution_history": [{"type": "armory", "resource_type": "tool",
+                                                         "resource_name": "web_search", "result": {"success": True}}]}}
         handle_step(renderer, step)
         self.assertTrue(renderer.lines[0].startswith("[OK] "))
         output = renderer.console.file.getvalue()
@@ -100,7 +102,9 @@ class TestHandleStep(unittest.TestCase):
 
     def test_tool_result_failure_surfaces_error(self):
         renderer = TurnRenderer(make_console(), live=False)
-        step = {"tool_node": {"execution_history": [{"tool_name": "execute_bash", "result": {"success": False, "error": "boom"}}]}}
+        step = {"armory_node": {"execution_history": [{"type": "armory", "resource_type": "tool",
+                                                         "resource_name": "execute_bash",
+                                                         "result": {"success": False, "error": "boom"}}]}}
         handle_step(renderer, step)
         self.assertTrue(renderer.lines[0].startswith("[FAILED] "))
         self.assertIn("boom", renderer.lines[0])

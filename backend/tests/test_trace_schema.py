@@ -17,12 +17,12 @@ def test_trace_correlations_and_redaction(caplog):
     token = bind(agent_id="a", execution_id="e", owner_id="u", session_id="s")
     try:
         with caplog.at_level(logging.INFO, logger="agent.trace"):
-            with span("tool", "call", component="tool_node", data={"tool_name": "search",
+            with span("armory", "call", component="armory_node", data={"resource_name": "search",
                                                                   "raw_secret": "password123"}):
                 emit("child.lifecycle.spawn", child_agent_id="child", component="agent_core",
                      data={"task_size": 12})
         events = [json.loads(record.message) for record in caplog.records if record.name == "agent.trace"]
-        assert [row["event"] for row in events] == ["tool.call.start", "child.lifecycle.spawn", "tool.call.end"]
+        assert [row["event"] for row in events] == ["armory.call.start", "child.lifecycle.spawn", "armory.call.end"]
         assert {row["trace"]["trace_id"] for row in events}.__len__() == 1
         assert events[1]["trace"]["parent_span_id"] == events[0]["trace"]["span_id"]
         assert all(row["ids"]["execution_id"] == "e" for row in events)
@@ -46,13 +46,13 @@ def test_missing_ids_fail_and_handled_error_emits(caplog):
     try:
         with caplog.at_level(logging.INFO, logger="agent.trace"):
             try:
-                with span("tool", "call", component="tool_node"):
+                with span("armory", "call", component="armory_node"):
                     raise RuntimeError("sensitive details")
             except RuntimeError:
                 pass
         error = json.loads([record.message for record in caplog.records
                             if record.name == "agent.trace"][-1])
-        assert error["event"] == "tool.call.error"
+        assert error["event"] == "armory.call.error"
         assert error["status"] == "error"
         assert error["error"]["type"] == "RuntimeError"
         assert "sensitive details" not in str(error)

@@ -30,7 +30,7 @@ class PreferencesUpdateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_agent_preferences(self):
-        allowed = {"model_id", "enabled_tools", "enabled_subagents", "confirm_tools",
+        allowed = {"model_id", "confirm_tools",
                    "max_loops", "max_plan_steps", "verbose", "memory_policy_ceiling"}
         if self.agent is not None and set(self.agent) - allowed:
             raise ValueError("Agent policy must be updated through AgentCore")

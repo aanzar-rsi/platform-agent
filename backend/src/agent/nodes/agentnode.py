@@ -19,16 +19,12 @@ from src.agent.memory import (
     record_execution,
     slim_execution_history,
 )
-from src.agent.plan import parse_plan
 from src.agent.state import PlanExecuteState
 from src.agent.token_stream import emit_token
 from src.models.llm_client import DEFAULT_MODEL
 from src.models.llm_client import call_llm_stream
 from src.prompts.prompt_loader import fast_agent_prompt_loader, planner_agent_prompt_loader
-from src.subagents.registry import get_subagents
-from src.tools import INTERNAL_TOOLS
-from api.services.mcp_runtime import available_mcp_tools
-from src.agent.policy_schema import armory_resource_allowed
+from src.agent.facets import Armory
 
 # Learned-experience retrieval is advisory-only (see prompt: "may be empty or
 # irrelevant") but sits in front of *every* planning LLM call. A single small
@@ -135,11 +131,9 @@ def _parse_child_calls(raw: str) -> list[dict]:
 
 def _map_plan_step_to_next_step(step: dict) -> dict:
     action = step.get("action")
-    if action == "tool_call":
-        return {"action": "tool", "tool_name": step.get("name"), "tool_args": step.get("parameters") or {},
-                "task": step.get("task") or ""}
-    if action == "agent_call":
-        return {"action": "subagent", "agent_name": step.get("name"), "tool_args": step.get("parameters") or {},
+    if action == "armory_call":
+        return {"action": "armory", "resource_type": step.get("resource_type"),
+                "resource_name": step.get("name"), "arguments": step.get("parameters") or {},
                 "task": step.get("task") or ""}
     if action == "spawn_children":
         calls = step.get("child_calls") if isinstance(step.get("child_calls"), list) else []
@@ -176,8 +170,7 @@ def _run_stream(stream, on_token=None) -> str:
     """
     Consume the LLM stream, call on_token for each visible chunk, return the full buffer.
 
-    - planner_exit=True  → streams tokens inside <output>...</output>
-    - planner_exit=False → streams tokens inside <reasoning>...</reasoning>
+    Streams reasoning and, for exit actions, user-facing data.
     """
     buffer = ""
     exit_mode = None
@@ -211,7 +204,10 @@ def _run_stream(stream, on_token=None) -> str:
         buffer += chunk
 
         if exit_mode is None:
-            if "<planner_exit>True</planner_exit>" in buffer:
+            action = _extract_tag(buffer, "action").lower()
+            if action:
+                exit_mode = action in {"exit", "planner_exit", "none"}
+            elif "<planner_exit>True</planner_exit>" in buffer:
                 exit_mode = True
             elif "<planner_exit>False</planner_exit>" in buffer:
                 exit_mode = False
@@ -219,7 +215,10 @@ def _run_stream(stream, on_token=None) -> str:
         if exit_mode is not None:
             emit_tag("reasoning", "reasoning")
             if exit_mode:
-                emit_tag("output", "output")
+                if "<output>" in buffer:
+                    emit_tag("output", "output")
+                else:
+                    emit_tag("data", "output")
 
     return buffer
 
@@ -261,13 +260,13 @@ def _pending_children(execution_history: list[dict]) -> list[str]:
 
 def _parse_response(buffer: str, *, turn_start: bool) -> dict:
     """Parse the full LLM response into a state update dict."""
-    planner_exit = _extract_tag(buffer, "planner_exit") == "True"
-    action_raw = _extract_tag(buffer, "action")
+    action_raw = _extract_tag(buffer, "action").strip().lower()
+    planner_exit = action_raw in {"exit", "planner_exit"} or _extract_tag(buffer, "planner_exit") == "True"
     task = _extract_tag(buffer, "task")
     intent = _extract_tag(buffer, "session_intent").lower()
 
     if planner_exit:
-        answer = _extract_tag(buffer, "output")
+        answer = _extract_tag(buffer, "output") or _extract_tag(buffer, "data")
         reasoning = _extract_tag(buffer, "reasoning")
         update = {
             "current_task": "finish",
@@ -306,18 +305,21 @@ def _parse_response(buffer: str, *, turn_start: bool) -> dict:
                 "task": task,
                 "child_calls": _parse_child_calls(params.get("child_calls") or ""),
             }
-        elif action_raw == "plan":
+        elif action_raw in {"plan", "planner", "continue", "retry"}:
+            data = _extract_tag(buffer, "data")
+            batch_data = data if data.lstrip().startswith(("{", "[")) else ""
             next_step = {
                 "action": "plan",
                 "task": task,
-                "steps_json": params.get("steps_json") or "",
+                "steps_json": params.get("steps_json") or batch_data,
             }
-        elif action_raw == "agent_call":
+        elif action_raw == "armory_call":
             next_step = {
-                "action": "subagent",
-                "agent_name": name,
+                "action": "armory",
+                "resource_type": params.pop("resource_type", "tool"),
+                "resource_name": name,
                 "task": task,
-                "tool_args": params,
+                "arguments": params,
             }
         elif action_raw == "ask_user":
             question = (params.get("question") or "").strip()
@@ -336,7 +338,8 @@ def _parse_response(buffer: str, *, turn_start: bool) -> dict:
                 "task": task,
             }
         else:
-            next_step = {"action": "tool", "tool_name": name, "tool_args": params, "task": task}
+            next_step = {"action": "armory", "resource_type": "tool", "resource_name": name,
+                         "arguments": params, "task": task}
 
         step_content = reasoning or f"Calling {name}"
         update = {
@@ -368,12 +371,11 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
     Responsibilities:
     - Read messages, execution_memory index, and context_memory to understand progress.
     - On turn start, decide continue vs restart of prior plan scratch.
-    - Decide the next action: tool, subagent, child_agent, context_select, or finish.
+    - Decide the next action: armory, child_agent, context_select, or finish.
     - Write next_step so conditional edges can route control correctly.
 
     next_step conventions:
-        {"action": "tool",            "tool_name": "<name>", "tool_args": {...}}
-        {"action": "subagent",        "agent_name": "<name>", "task": "<desc>", "tool_args": {...}}
+        {"action": "armory", "resource_type": "<type>", "resource_name": "<name>", "arguments": {...}}
         {"action": "child_agent",     "task": "<desc>", "child_calls": [{...}]}
         {"action": "context_select",  "key": "<em_key>", "from_token": int, "to_token": int|None}
         {"action": "ask_user",        "question": "<question>", "options": [...]}
@@ -459,23 +461,11 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
 
     learned = _safe_learned_experiences(user_query, execution_history, uid=uid) if uid else "(none)"
 
-    enabled_tools = configurable.get("enabled_tools")
     effective_armory = (configurable.get("policy") or {}).get("armory") or {}
-    tools = [tool for tool in INTERNAL_TOOLS
-             if (enabled_tools is None or tool.name in enabled_tools)
-             and armory_resource_allowed(effective_armory, group="tools", name=tool.name)]
-    tools += [tool for name, tool in available_mcp_tools(uid, reconnect=True).items()
-              if (enabled_tools is None or name in enabled_tools)
-              and armory_resource_allowed(effective_armory, group="tools", name=name)]
-    if traced:
-        trace_emit("armory.discovery.list", component="agent_node",
-                   data={"returned_count": len(tools)})
-    enabled_subagents = configurable.get("enabled_subagents")
-    subagents = [
-        subagent for subagent in get_subagents(uid)
-        if (enabled_subagents is None or subagent.name in enabled_subagents)
-        and armory_resource_allowed(effective_armory, group="subagents", name=subagent.name)
-    ]
+    resources = Armory(effective_armory, user_id=uid,
+                       preloaded_context=state.get("preloaded_context")).list(reconnect=True)
+    tools = [resource for resource in resources if resource.type == "tool"]
+    subagents = [resource for resource in resources if resource.type == "subagent"]
 
     first_request = sum(getattr(message, "type", None) == "human" for message in messages) == 1 and not execution_history
     use_fast_prompt = first_request or len((user_query or "").strip()) < 10
@@ -486,7 +476,7 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
     )
     # Fast/direct answering is safe only before execution memory exists. Every
     # LLM call after an external input receives the complete index + FIFO view.
-    use_fast_prompt = use_fast_prompt and not execution_memory
+    use_fast_prompt = use_fast_prompt and not execution_memory and not state.get("planner_mode")
     if use_fast_prompt:
         system_prompt, prompt = fast_agent_prompt_loader(
             user_query=user_query,
@@ -506,6 +496,7 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
             current_task=state.get("current_task", ""),
             max_plan_steps=int(configurable.get("max_plan_steps") or 8),
             child_mode=bool(configurable.get("child_agent_id")),
+            planner_error=state.get("planner_error"),
         )
 
     if traced:
@@ -530,107 +521,12 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
         emit_token(text, channel)
 
     buffer = _run_stream(stream, on_token=_on_token)
-    update = _parse_response(buffer, turn_start=turn_start)
-
-    if update.get("next_step", {}).get("action") == "plan":
-        max_plan_steps = int(configurable.get("max_plan_steps") or 8)
-        raw = update["next_step"].get("steps_json") or ""
-
-        def run_planner_call(*, reinforce_steps_json: bool = False, parse_error: str = "") -> tuple[str, dict]:
-            planner_query = user_query
-            if reinforce_steps_json:
-                planner_query = (
-                    f"{user_query}\n\n"
-                    "IMPORTANT: Return <action>plan</action> and include "
-                    "<parameters><steps_json>...</steps_json></parameters> where steps_json is a valid JSON object."
-                )
-            if parse_error:
-                planner_query += (
-                    "\n\n"
-                    f"Previous steps_json failed validation: {parse_error}. "
-                    "Return corrected JSON only inside <steps_json> with no prose."
-                )
-            system_prompt, prompt = planner_agent_prompt_loader(
-                user_query=planner_query, tools=tools, subagents=subagents,
-                execution_history=slim_execution_history(execution_history),
-                execution_memory_index=build_execution_memory_index(execution_memory, context_memory),
-                context_memory=context_memory, conversation=conversation_text,
-                current_task=state.get("current_task", ""), max_plan_steps=max_plan_steps,
-                child_mode=bool(configurable.get("child_agent_id")),
-            )
-            planner_buffer = _run_stream(
-                call_llm_stream(
-                    prompt,
-                    system_prompt=system_prompt,
-                    model_id=configurable.get("model_id") or DEFAULT_MODEL,
-                ),
-                on_token=_on_token,
-            )
-            return planner_buffer, _parse_response(planner_buffer, turn_start=False)
-
-        if not raw and use_fast_prompt:
-            buffer, update = run_planner_call(reinforce_steps_json=False)
-
-        if update.get("next_step", {}).get("action") == "plan":
-            raw = update.get("next_step", {}).get("steps_json") or ""
-            if not raw:
-                buffer, update = run_planner_call(reinforce_steps_json=True)
-
-        if update.get("next_step", {}).get("action") == "plan":
-            raw = update.get("next_step", {}).get("steps_json") or ""
-            if not raw:
-                update = _planner_escalation_error("missing_steps_json", "planner returned action=plan without steps_json")
-            else:
-                try:
-                    planned = parse_plan(raw, max_plan_steps=max_plan_steps,
-                                         tools={tool.name for tool in tools}, subagents={spec.name for spec in subagents})
-                except (ValueError, TypeError) as exc:
-                    buffer, update = run_planner_call(reinforce_steps_json=True, parse_error=str(exc))
-                    raw_retry = update.get("next_step", {}).get("steps_json") or ""
-                    if update.get("next_step", {}).get("action") == "plan" and raw_retry:
-                        try:
-                            planned = parse_plan(raw_retry, max_plan_steps=max_plan_steps,
-                                                 tools={tool.name for tool in tools}, subagents={spec.name for spec in subagents})
-                        except (ValueError, TypeError) as retry_exc:
-                            update = {
-                                "current_task": "finish",
-                                "next_step": {
-                                    "action": "finish",
-                                    "answer": (
-                                        "I couldn't construct a valid execution plan right now. "
-                                        "Please retry your request."
-                                    ),
-                                },
-                                "messages": [AIMessage(content=f"Planner parse failed after retry: {retry_exc}")],
-                                "planned_phases": [],
-                                "planned_phase_index": 0,
-                            }
-                        else:
-                            update = {
-                                "planned_phases": planned,
-                                "planned_phase_index": 0,
-                                "plan_created": {"phases": planned, "step_count": sum(len(p["steps"]) for p in planned)},
-                                "messages": [
-                                    AIMessage(
-                                        content=f"Planned {sum(len((p.get('steps') or [])) for p in planned)} step(s) across {len(planned)} phase(s)",
-                                        additional_kwargs={"ui_hidden": True, "ui_step": {"type": "reasoning", "content": "Plan created"}},
-                                    )
-                                ],
-                            }
-                    elif update.get("next_step", {}).get("action") == "plan":
-                        update = _planner_escalation_error("missing_steps_json", "planner returned action=plan without steps_json after retry")
-                else:
-                    update = {
-                        "planned_phases": planned,
-                        "planned_phase_index": 0,
-                        "plan_created": {"phases": planned, "step_count": sum(len(p["steps"]) for p in planned)},
-                        "messages": [
-                            AIMessage(
-                                content=f"Planned {sum(len((p.get('steps') or [])) for p in planned)} step(s) across {len(planned)} phase(s)",
-                                additional_kwargs={"ui_hidden": True, "ui_step": {"type": "reasoning", "content": "Plan created"}},
-                            )
-                        ],
-                    }
+    update = {
+        "planner_response": buffer,
+        "planner_response_type": "classifier" if use_fast_prompt else "planner",
+        "planner_resources": [{"type": resource.type, "name": resource.name} for resource in resources],
+        "next_step": {"action": "validate_response"},
+    }
 
     if configurable.get("child_agent_id") and update.get("planned_phases"):
         phases = update["planned_phases"]

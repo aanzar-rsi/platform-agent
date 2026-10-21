@@ -326,11 +326,11 @@ def _infer_node(values: dict[str, Any], parent_values: dict[str, Any] | None) ->
     if len(history) > len(parent_history) and history:
         last = history[-1] or {}
         if last.get("type") == "tool":
-            return "tool_node"
+            return "armory_node"
         if last.get("type") == "subagent":
             if "human_rounds" in last or "awaiting_persist_confirmation" in (last.get("structured") or {}):
                 return "output_security_gate"
-            return "subagent_node"
+            return "armory_node"
 
     if values.get("context_memory") != parent_values.get("context_memory"):
         if len(history) == len(parent_history):

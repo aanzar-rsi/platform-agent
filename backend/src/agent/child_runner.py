@@ -269,12 +269,6 @@ class ChildRunner:
         from src.agent.graph import agent_app
         from src.utils.postgres_checkpointer import run_turn
 
-        if "weather" in task.lower():
-            from src.tools.web_search import web_search
-
-            result = web_search.invoke({"query": task, "count": 5, "provider": "auto"})
-            return str(result)
-
         values = dict(context or {})
         runtime = values.get("runtime") or {}
         agent_id = runtime.get("agent_id")
@@ -282,10 +276,6 @@ class ChildRunner:
         execution_id = runtime.get("execution_id")
         if not agent_id:
             raise ValueError("child_runtime_missing_agent_id")
-        runtime = {
-            **runtime,
-            "enabled_subagents": [],
-        }
         stream = run_turn(
             agent_app,
             agent_id,

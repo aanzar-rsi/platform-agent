@@ -67,11 +67,11 @@ Sub-agents:
 @block subagent_rules if=subagents
 Sub-agent call rules:
 - You may call a sub-agent again when its result needs further work, including within the same user turn.
-- If you already have the answer to a question the sub-agent would ask (from the conversation, memory, or reasonable inference), pass it via the agent_call's <parameters>.
+- If you already have the answer to a question the sub-agent would ask, pass it via the armory_call parameters.
 @end
 
 @block child_rules
-Child agents: use <action>spawn_children</action> (not tool_call) with <child_calls>[{"task":"first task"}]</child_calls>; then `collect_child`. Children inherit policy; `requested_policy` narrows it.
+Child agents: use <action>spawn_children</action> with <child_calls>[{"task":"first task"}]</child_calls>; then `collect_child`.
 @end
 
 Context memory rules:
@@ -83,27 +83,29 @@ Context memory rules:
 
 Decide the next step. Output strictly in the XML format below — no extra text before or after.
 
-If more work is needed, output a tool_call:
+If an armory resource is needed, output an armory_call:
 <planner_exit>False</planner_exit>
-<action>tool_call</action>
+<action>armory_call</action>
 <reasoning>reasoning for this decision</reasoning>
 <task>what task is this tool call trying to achieve</task>
 <data>
     <name>name of tool</name>
     <parameters>
+        <resource_type>tool</resource_type>
         <parameter_name>parameter value</parameter_name>
     </parameters>
 </data>
 
-@block agent_call_contract if=subagents
-If a listed sub-agent is a better fit than any single tool (the task matches its "when to use"), delegate to it with an agent_call:
+@block armory_subagent_contract if=subagents
+If a listed sub-agent is a better fit, invoke it through armory:
 <planner_exit>False</planner_exit>
-<action>agent_call</action>
+<action>armory_call</action>
 <reasoning>reasoning for delegating to this sub-agent instead of a tool</reasoning>
 <task>the full task/requirement to hand to the sub-agent, in the sub-agent's terms</task>
 <data>
     <name>name of the sub-agent</name>
     <parameters>
+        <resource_type>subagent</resource_type>
         <parameter_name>parameter value</parameter_name>
     </parameters>
 </data>

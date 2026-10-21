@@ -1,7 +1,4 @@
-"""Policy schema normalization and authorization helpers.
-
-Canonical policy schema (v2) remains backward compatible with legacy fields.
-"""
+"""Policy schema normalization and authorization helpers."""
 
 from __future__ import annotations
 
@@ -103,17 +100,11 @@ def normalize_armory_policy(raw: dict[str, Any] | None) -> dict[str, Any]:
     if legacy_subagents is not None and "subagents" not in groups:
         groups["subagents"] = {"enabled": True}
 
-    tool_snapshot = sorted(_enabled_resource_names({"resources": resources, "groups": groups}, "tools"))
-    if "*" in _enabled_resource_names({"resources": resources, "groups": groups}, "mcp_servers"):
-        tool_snapshot.append("mcp:*")
     return {
         "version": 2,
         "resources": resources,
         "groups": groups,
         "confirm_tools": _bool(raw.get("confirm_tools"), True),
-        # Legacy compatibility snapshots.
-        "tools": tool_snapshot,
-        "subagents": sorted(_enabled_resource_names({"resources": resources, "groups": groups}, "subagents")),
     }
 
 

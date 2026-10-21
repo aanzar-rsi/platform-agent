@@ -14,7 +14,6 @@ if str(ROOT) not in sys.path:
 from langchain_core.messages import HumanMessage
 
 from src.agent.nodes import agentnode
-from src.agent.nodes.toolnode import tool_node
 from src.utils.postgres_checkpointer import build_config
 
 
@@ -24,23 +23,10 @@ class TestRuntimeControls(unittest.TestCase):
         self.assertEqual(config["configurable"]["model_id"], "gpt-4.1")
         self.assertEqual(config["recursion_limit"], 7)
 
-    def test_disabled_tool_is_not_invoked(self):
-        state = {
-            "next_step": {"tool_name": "get_current_datetime_info", "tool_args": {}},
-            "execution_history": [],
-            "execution_memory": {},
-            "context_memory": None,
-            "current_task": "time",
-        }
-        result = tool_node(state, {"configurable": {"enabled_tools": []}})
-        entry = result["execution_history"][-1]
-        self.assertFalse(entry["result"]["success"])
-        self.assertIn("disabled", entry["result"]["error"])
-
     @patch.object(agentnode, "_safe_learned_experiences", return_value="")
     @patch.object(agentnode, "call_llm_stream")
     @patch.object(agentnode, "fast_agent_prompt_loader", return_value=("system", "prompt"))
-    def test_agent_uses_selected_model_and_filtered_tools(self, prompt_loader, llm_stream, _learned):
+    def test_agent_uses_selected_model(self, prompt_loader, llm_stream, _learned):
         llm_stream.return_value = iter([
             "<planner_exit>True</planner_exit><output>done</output><session_intent>continue</session_intent>"
         ])
@@ -54,7 +40,8 @@ class TestRuntimeControls(unittest.TestCase):
         }
         agentnode.agent_node(
             state,
-            {"configurable": {"model_id": "gpt-4.1", "enabled_tools": ["system_info"], "enabled_subagents": []}},
+            {"configurable": {"model_id": "gpt-4.1", "policy": {
+                "armory": {"tools": ["system_info"], "subagents": []}}}},
         )
         self.assertEqual([tool.name for tool in prompt_loader.call_args.kwargs["tools"]], ["system_info"])
         self.assertEqual(prompt_loader.call_args.kwargs["subagents"], [])

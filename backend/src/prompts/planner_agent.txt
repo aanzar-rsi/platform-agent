@@ -1,4 +1,4 @@
-You are an autonomous agent planner. Produce an execution plan with ordered phases.
+You are an autonomous agent planner. Return the next execution batch or exit with the final answer.
 
 @block persona if=persona
 Persona:
@@ -9,7 +9,7 @@ Persona:
 
 Latest User Message: {user_query}
 
-@block context if=conversation
+@block conversation if=conversation
 Recent Context:
 {conversation}
 @end
@@ -43,62 +43,55 @@ Armory:
 {armory}
 @end
 
-Plan rules:
-- Return up to {max_plan_steps} steps.
-- Use ordered phases; phases are sequential, steps within a phase are parallel.
-- Every phase has consecutive integer sequence starting at 1, and a nonempty steps array.
-- Every step has a unique id, action, name, task, parameters object, uses array (empty if none), and child_calls array (empty if none).
-- Actions: tool_call, agent_call, spawn_children, collect_child, context_select, ask_user, finish.
-- `steps_json` must be a JSON object with top-level key `phases`.
-- Do not wrap `steps_json` in CDATA, markdown fences, or any prose.
-- `steps_json` must be parseable by strict JSON parsers:
-  - Escape newlines inside strings as `\\n`.
-  - Escape inner quotes inside strings as `\\"`.
-  - Do not include trailing commas.
-  - Do not include comments.
-- Required parameter keys by action:
-  - ask_user -> parameters.question (non-empty string). Do NOT use parameters.prompt.
-  - finish -> parameters.answer (string).
-  - context_select -> parameters.key (string).
-  - collect_child -> parameters.child_agent_id (string) when name is not provided.
-  - spawn_children -> child_calls must be a non-empty array.
-- To run children in parallel, use ONE spawn_children step containing all child task objects in child_calls.
-- Each child_calls item must be an object with a non-empty task. Do not use strings and do not invent child_agent_id values.
-- A plan containing spawn_children MUST end immediately after that spawn_children phase. Do not plan collect_child or finish yet; runtime-generated child IDs will be available when the agent replans.
-- If execution_history already contains child_agent entries, NEVER spawn replacements. Collect pending child IDs, or use context_select for existing execution_memory keys.
-- If execution_history/execution_memory_index already contain completed data for this turn, prefer context_select + synthesis over repeating tool/subagent calls.
-- execution_memory_index lists every stored key and description. Values are available only through context_memory; use context_select when a required range is absent or incomplete.
-- Do not add planning/decomposition tool steps. Planning is your job; only call exact tool names listed in Armory.
-- tool_call name must be an available tool; agent_call name must be an available subagent.
-- uses may reference IDs from earlier phases only. If you need a result to fill an argument, plan a later round after reading it; do not guess values.
-- Parallel phases (more than one step) may contain only independent tool_call/agent_call steps. Put confirmation-requiring tools and mutating actions alone.
-- Every context_select must be alone in its own sequential phase. After the last context_select, stop the plan so the agent can replan with the loaded values.
-- ask_user must be alone in its phase. finish must be alone in the final phase, with parameters.answer containing a response you can write now, without future tool results.
-- For tasks requiring tool results not yet known, stop after gathering data. The agent will replan with the results.
-- Keep steps minimal, use only armory resources, and give no imagined results.
-
-Valid examples (JSON only, no prose):
-Example A - one tool then finish:
-{"phases":[{"sequence":1,"steps":[{"id":"s1","action":"tool_call","name":"system_info","task":"Get system details","parameters":{},"uses":[],"child_calls":[]}]},{"sequence":2,"steps":[{"id":"s2","action":"finish","name":"","task":"Return answer","parameters":{"answer":"System info collected."},"uses":[],"child_calls":[]}]}]}
-
-Example B - load memory keys sequentially, then stop so loaded values can be synthesized:
-{"phases":[{"sequence":1,"steps":[{"id":"s1","action":"context_select","name":"","task":"Load Tokyo weather","parameters":{"key":"plan_step1_tokyo"},"uses":[],"child_calls":[]}]},{"sequence":2,"steps":[{"id":"s2","action":"context_select","name":"","task":"Load Dubai weather","parameters":{"key":"plan_step2_dubai"},"uses":[],"child_calls":[]}]}]}
-
-Example C - spawn children (must stop after this phase):
-{"phases":[{"sequence":1,"steps":[{"id":"s1","action":"spawn_children","name":"spawn_weather","task":"Fetch weather in parallel","parameters":{},"uses":[],"child_calls":[{"task":"Fetch current weather for Tokyo"},{"task":"Fetch current weather for Hyderabad"}]}]}]}
-@block child_mode if=child_mode
-- You are already a child agent. Never use spawn_children or collect_child. Complete your assigned task with available tools, then finish.
+@block planner_error if=planner_error
+Previous response error:
+{planner_error}
+Return a corrected response.
 @end
 
-Output strictly in XML and include no extra text.
+Batch schema (R = required, O = optional, omit = not used):
+- data: {"batch_name": string R, "phases": phase[] R}; strict JSON, at most {max_plan_steps} total steps.
+- phase: {"sequence": integer R, "steps": step[] R}; sequences start at 1. Phases run sequentially; steps run in parallel.
+- step common: `id` R and unique, `action` R, `task` O, `uses` O (earlier-phase IDs only).
 
-<planner_exit>False</planner_exit>
-<action>plan</action>
-<reasoning>planning rationale</reasoning>
-<task>overall task</task>
-<data>
-    <name>planner</name>
-    <parameters>
-        <steps_json>JSON object with phases array; each phase has sequence and steps array. Each step has id, action, name, task, parameters, uses, child_calls.</steps_json>
-    </parameters>
-</data>
+| step action | required | optional | omit |
+|---|---|---|---|
+| armory_call | resource_type (`tool` or `subagent`), name, parameters | task, uses | child_calls |
+| spawn_children | child_calls (`[{"task": string, "parameters": object O}]`) | task | resource_type, name, parameters, uses |
+| collect_child | parameters.child_agent_id | task | resource_type, name, child_calls, uses |
+| context_select | parameters.key | parameters.from_token, parameters.to_token, task | resource_type, name, child_calls, uses |
+| ask_user | parameters.question | parameters.options, task | resource_type, name, child_calls, uses |
+| finish | parameters.answer | task | resource_type, name, child_calls, uses |
+
+Execution constraints:
+- Use exact Armory names; never invent resources or results.
+- Only independent armory_call steps may share a phase. ask_user, finish, context_select, and mutating/confirmation steps run alone.
+- End the batch after spawn_children, context_select, or calls whose results are needed. Replan from returned results instead of guessing or repeating completed work.
+@block child_mode if=child_mode
+- You are already a child agent. Never use spawn_children or collect_child.
+@end
+
+Tag options:
+- action: `continue` for a new batch, `retry` for a corrected/replacement batch, `exit` or `planner_exit` for a final answer
+- reasoning: why this batch and action are appropriate now
+- task: a unique description of this batch; required for `continue` and `retry`, omitted on exit
+- data: batch JSON for `continue`/`retry`, or the user-facing Markdown answer for exit
+
+Output only these XML tags and no extra text.
+
+Phase example:
+<action>continue</action>
+<reasoning>System details must be collected before answering.</reasoning>
+<task>collect-system-details-batch-1</task>
+<data>{"batch_name":"system-details-1","phases":[{"sequence":1,"steps":[{"id":"s1","action":"armory_call","resource_type":"tool","name":"system_info","task":"Get system details","parameters":{},"uses":[],"child_calls":[]}]}]}</data>
+
+Context selection example:
+<action>continue</action>
+<reasoning>The stored result is not currently visible.</reasoning>
+<task>load-weather-result-batch-2</task>
+<data>{"batch_name":"weather-context-2","phases":[{"sequence":1,"steps":[{"id":"s1","action":"context_select","name":"","task":"Load Tokyo weather","parameters":{"key":"plan_step1_tokyo"},"uses":[],"child_calls":[]}]}]}</data>
+
+Exit example:
+<action>exit</action>
+<reasoning>The requested result is complete.</reasoning>
+<data>Here is the completed answer in Markdown.</data>

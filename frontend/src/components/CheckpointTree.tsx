@@ -304,7 +304,7 @@ export default function CheckpointTree({
                       className="flex items-start gap-1 text-[10.5px] leading-[14px]"
                       style={{ color: "var(--theme-main-text)", width: labelWidth, minHeight: n.labelHeight }}
                     >
-                      {n.node === "agent_node" || n.node === "subagent_node" || n.node === "subagent_gate"
+                      {n.node === "agent_node" || n.node === "armory_node" || n.node === "subagent_gate"
                          ? <img src="/brain_icon.svg" alt="" width={10} height={10} className="mt-[1px] h-2.5 w-2.5 shrink-0" />
                         : <Icon className="mt-[1px] h-2.5 w-2.5 shrink-0" style={{ color: style.color }} />}
                       <span className="min-w-0 flex-1 whitespace-normal break-words">{n.labelText}</span>

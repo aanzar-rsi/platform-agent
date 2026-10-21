@@ -245,9 +245,9 @@ def agentnode_prompt_loader(
 
 
 def _armory_text(*, tools: list, subagents: list | None = None) -> str:
-    tools_text = "\n".join(f"- {t.name}: {t.description}" for t in (tools or []))
+    tools_text = "\n".join(f"- armory.tool.{t.name}: {t.description}" for t in (tools or []))
     subagents_text = "\n".join(
-        f"- {s.name}: {s.description} (when to use: {s.when_to_use})"
+        f"- armory.subagent.{s.name}: {s.description}"
         for s in (subagents or [])
     )
     static_actions = "\n".join([
@@ -293,6 +293,7 @@ def planner_agent_prompt_loader(
     current_task: str = "",
     max_plan_steps: int = 8,
     child_mode: bool = False,
+    planner_error: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     context = {
         "persona": _load_module("persona"),
@@ -306,5 +307,6 @@ def planner_agent_prompt_loader(
         "armory": _armory_text(tools=tools, subagents=subagents),
         "max_plan_steps": max(1, int(max_plan_steps or 1)),
         "child_mode": child_mode,
+        "planner_error": planner_error or {},
     }
     return load_prompt("planner_agent", context)

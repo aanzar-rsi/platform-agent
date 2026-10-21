@@ -9,6 +9,20 @@ import pytest
 from src.agent.agent_core import AgentCore, ChildRunner, Memory, Policy, default_policy, intersect_policy
 
 
+def armory(*, tools=(), subagents=()):
+    return {
+        "resources": {
+            "tools": [{"type": "tool", "name": name, "enabled": True} for name in tools],
+            "subagents": [{"type": "subagent", "name": name, "enabled": True} for name in subagents],
+        },
+        "groups": {"tools": {"enabled": True}, "subagents": {"enabled": True}},
+    }
+
+
+def enabled(policy, group):
+    return [item["name"] for item in policy["resources"].get(group, []) if item.get("enabled", True)]
+
+
 class FakeAgents:
     def __init__(self):
         self.agents = {}
@@ -102,13 +116,13 @@ def parent_core(repo):
 
 
 def test_policy_intersection_and_memory_identity():
-    parent = default_policy({"enabled_tools": ["read_file"], "enabled_subagents": ["worker"]})
-    requested = Policy({"tools": ["read_file", "execute_bash"], "subagents": ["worker", "admin"]},
+    parent = Policy(armory(tools=("read_file",), subagents=("worker",)), default_policy().memory, {}, {})
+    requested = Policy(armory(tools=("read_file", "execute_bash"), subagents=("worker", "admin")),
                        {"read": ["USER", "TENANT", "AGENT"], "write": ["USER", "AGENT"],
                         "tenant_id": "forged"}, {}, {})
     effective = intersect_policy(parent, requested)
-    assert effective.armory["tools"] == ["read_file"]
-    assert effective.armory["subagents"] == ["worker"]
+    assert enabled(effective.armory, "tools") == ["read_file"]
+    assert enabled(effective.armory, "subagents") == ["worker"]
     assert effective.memory["read"] == ["USER", "AGENT"]
     assert effective.memory["write"] == ["USER"]
     assert effective.memory["tenant_id"] is None
@@ -126,11 +140,11 @@ def test_user_agent_spawns_with_inherited_or_narrowed_policy():
     try:
         inherited = runner.spawn_child(parent, "first", lambda task, ctx: "ok", {})
         assert runner.await_child(inherited.child_agent_id) == "ok"
-        assert set(repo.get(inherited.child_agent_id)["policy"]["armory"]["tools"]) == set(parent.policy.armory["tools"])
+        assert set(enabled(repo.get(inherited.child_agent_id)["policy"]["armory"], "tools")) == set(enabled(parent.policy.armory, "tools"))
         narrowed = runner.spawn_child(parent, "second", lambda task, ctx: "ok", {},
-                                     requested_policy=Policy({"tools": ["read_file"]}, {}, {}, {}))
+                                     requested_policy=Policy(armory(tools=("read_file",)), {}, {}, {}))
         assert runner.await_child(narrowed.child_agent_id) == "ok"
-        assert repo.get(narrowed.child_agent_id)["policy"]["armory"]["tools"] == ["read_file"]
+        assert enabled(repo.get(narrowed.child_agent_id)["policy"]["armory"], "tools") == ["read_file"]
         assert set(repo.get(narrowed.child_agent_id)["policy"]["memory"]["read"]) == set(parent.policy.memory["read"])
     finally:
         runner.pool.shutdown(wait=True)
@@ -174,21 +188,21 @@ def test_policy_updates_and_interrupted_close():
     repo = FakeAgents()
     agent = parent_core(repo)
     with pytest.raises(PermissionError):
-        agent.update_armory_policy({"tools": ["new_tool"]}, uid=agent.id.owner_id, expected_version=1)
-    agent.update_armory_policy({"tools": ["read_file"]}, uid=agent.id.owner_id, expected_version=1)
+        agent.update_armory_policy(armory(tools=("new_tool",)), uid=agent.id.owner_id, expected_version=1)
+    agent.update_armory_policy(armory(tools=("read_file",)), uid=agent.id.owner_id, expected_version=1)
     assert agent.policy.version == 2
     with pytest.raises(ValueError, match="policy_conflict"):
         agent.update_memory_policy({"read": ["USER"]}, uid=agent.id.owner_id, expected_version=1)
     agent.update_memory_policy({"read": ["USER"]}, uid=agent.id.owner_id, expected_version=2)
     assert agent.policy.version == 3
     agent.update_memory_policy({"read": ["USER", "AGENT"]}, uid=agent.id.owner_id, expected_version=3)
-    agent.update_armory_policy({"tools": agent.record["policy_ceiling"]["armory"]["tools"]},
+    agent.update_armory_policy(agent.record["policy_ceiling"]["armory"],
                                uid=agent.id.owner_id, expected_version=4)
     assert agent.policy.version == 5
     with pytest.raises(PermissionError):
         agent.update_memory_policy({"tenant_id": "forged"}, uid=agent.id.owner_id, expected_version=5)
     with pytest.raises(ValueError, match="invalid_armory_policy"):
-        agent.update_armory_policy({"tools": "read_file"}, uid=agent.id.owner_id, expected_version=5)
+        agent.update_armory_policy({"resources": []}, uid=agent.id.owner_id, expected_version=5)
     execution_id = agent.run()
     agent.finish("interrupted")
     with pytest.raises(ValueError, match="agent_busy"):

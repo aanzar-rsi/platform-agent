@@ -51,7 +51,7 @@ class AgentCore:
 
     @property
     def armory(self) -> Armory:
-        return Armory(self.policy.armory)
+        return Armory(self.policy.armory, user_id=self.id.owner_id)
 
     @property
     def guardrails(self) -> Guardrails:
@@ -113,27 +113,16 @@ class AgentCore:
             raise ValueError("agent_closed")
         if not isinstance(new_scope, dict):
             raise ValueError("invalid_armory_policy")
-        for key in ("tools", "subagents"):
-            if key in new_scope and (not isinstance(new_scope[key], list) or any(not isinstance(item, str) for item in new_scope[key])):
-                raise ValueError("invalid_armory_policy")
+        if any(key in new_scope for key in ("tools", "subagents")):
+            raise ValueError("invalid_armory_policy")
+        if "resources" in new_scope and not isinstance(new_scope["resources"], dict):
+            raise ValueError("invalid_armory_policy")
+        if "groups" in new_scope and not isinstance(new_scope["groups"], dict):
+            raise ValueError("invalid_armory_policy")
         if "confirm_tools" in new_scope and not isinstance(new_scope["confirm_tools"], bool):
             raise ValueError("invalid_armory_policy")
         previous = normalize_armory_policy(self.policy.armory)
         effective_raw = {**previous, **new_scope}
-        for legacy_key in ("tools", "subagents"):
-            if legacy_key in new_scope and isinstance(new_scope[legacy_key], list):
-                effective_raw.setdefault("resources", {})
-                effective_raw["resources"][legacy_key] = [
-                    {
-                        "type": "tool" if legacy_key == "tools" else "subagent",
-                        "name": name,
-                        "enabled": True,
-                    }
-                    for name in new_scope[legacy_key]
-                    if isinstance(name, str)
-                ]
-                effective_raw.setdefault("groups", {})
-                effective_raw["groups"][legacy_key] = {"enabled": True}
         effective = normalize_armory_policy(effective_raw)
         ceiling = normalize_armory_policy((self.record.get("policy_ceiling") or self.record["policy"])["armory"])
         bounded = intersect_armory(ceiling, effective, ceiling)

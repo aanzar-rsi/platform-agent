@@ -30,8 +30,7 @@ def dispatch_phase(state: dict):
 
 def planned_step_node(state: dict, config=None) -> dict:
     from src.agent.nodes.input_security_gate import input_security_gate_node
-    from src.agent.nodes.toolnode import tool_node
-    from src.agent.nodes.subagentnode import subagent_node
+    from src.agent.nodes.armory_node import armory_node
     from src.agent.nodes.child_agent_node import child_agent_node
     from src.agent.nodes.collect_child import collect_child_node
     from src.agent.nodes.context_selector import context_selector_node
@@ -46,7 +45,7 @@ def planned_step_node(state: dict, config=None) -> dict:
         outcome = {"error": next_step.get("answer")}
     else:
         nodes = {
-            "tool": tool_node, "subagent": subagent_node, "child_agent": child_agent_node,
+            "armory": armory_node, "child_agent": child_agent_node,
             "collect_child": collect_child_node, "context_select": context_selector_node,
             "ask_user": human_input_node,
         }
@@ -89,7 +88,7 @@ def phase_collector_node(state: dict, config=None) -> dict:
         if result["action"] == "collect_child":
             new_entries = [entry for entry in entries if entry.get("child_agent_id") ==
                            (outcome.get("next_step") or {}).get("child_agent_id")]
-        if outcome.get("error") or (not new_entries and result["action"] in {"tool", "subagent", "child_agent", "collect_child"}):
+        if outcome.get("error") or (not new_entries and result["action"] in {"armory", "child_agent", "collect_child"}):
             failed = True
         for entry in new_entries:
             original_key = entry.get("key")

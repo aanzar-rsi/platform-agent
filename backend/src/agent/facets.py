@@ -114,11 +114,95 @@ class Memory:
 
 
 class Armory:
-    def __init__(self, policy: dict) -> None:
-        self.policy = dict(policy)
+    """The only discovery and invocation boundary for executable resources."""
 
-    def allowed(self, name: str, kind: str = "tools") -> bool:
-        return armory_resource_allowed(self.policy, group=kind, name=name)
+    def __init__(self, policy: dict, *, user_id: str | None = None,
+                 preloaded_context: dict | None = None) -> None:
+        self.policy = dict(policy)
+        self.user_id = user_id
+        self.preloaded_context = dict(preloaded_context or {})
+
+    def list(self, resource_type: str | None = None, *, reconnect: bool = False) -> list:
+        from dataclasses import dataclass
+        from src.subagents.registry import get_subagents
+        from src.tools import INTERNAL_TOOLS
+
+        @dataclass(frozen=True)
+        class Resource:
+            type: str
+            name: str
+            description: str
+            target: object
+            confirmation_required: bool = False
+
+        resources = []
+        if resource_type in (None, "tool"):
+            confirm = {"edit_file", "execute_bash", "execute_powershell", "execute_python_script"}
+            resources.extend(
+                Resource("tool", tool.name, tool.description, tool, tool.name in confirm)
+                for tool in INTERNAL_TOOLS
+                if armory_resource_allowed(self.policy, group="tools", name=tool.name)
+            )
+            if self.user_id:
+                from api.services.mcp_runtime import available_mcp_tools
+
+                resources.extend(
+                    Resource("tool", name, tool.description, tool)
+                    for name, tool in available_mcp_tools(self.user_id, reconnect=reconnect).items()
+                    if armory_resource_allowed(self.policy, group="tools", name=name)
+                )
+        if resource_type in (None, "subagent"):
+            resources.extend(
+                Resource("subagent", spec.name, spec.description, spec)
+                for spec in get_subagents(self.user_id)
+                if armory_resource_allowed(self.policy, group="subagents", name=spec.name)
+            )
+        return resources
+
+    def get(self, resource_type: str, resource_name: str, *, reconnect: bool = False):
+        if resource_type not in {"tool", "subagent"}:
+            raise ValueError(f"Unknown armory resource type: {resource_type}")
+        return next(
+            (resource for resource in self.list(resource_type, reconnect=reconnect)
+             if resource.name == resource_name),
+            None,
+        )
+
+    def call(self, resource_type: str, resource_name: str, arguments: dict,
+             *, task: str = "", reconnect: bool = False):
+        """Authorize, resolve, validate, and invoke one resource."""
+        if not isinstance(arguments, dict):
+            raise ValueError("Armory arguments must be an object")
+        resource = self.get(resource_type, resource_name, reconnect=reconnect)
+        if resource is None:
+            group = "tools" if resource_type == "tool" else "subagents"
+            if not armory_resource_allowed(self.policy, group=group, name=resource_name):
+                from src.utils.trace import emit, in_run
+                if in_run():
+                    emit("armory.authz.deny", component="armory", status="denied",
+                         error=PermissionError("armory_resource_denied"),
+                         data={"resource_type": resource_type, "resource_name": resource_name})
+                raise PermissionError(f"Armory resource denied: {resource_type}.{resource_name}")
+            raise LookupError(f"Unknown armory resource: {resource_type}.{resource_name}")
+
+        from src.utils.trace import emit, in_run
+        if in_run():
+            emit("armory.authz.allow", component="armory",
+                 data={"resource_type": resource_type, "resource_name": resource_name})
+
+        if resource_type == "subagent":
+            context = {**self.preloaded_context, "parameters": arguments}
+            if self.user_id:
+                context["uid"] = self.user_id
+            result = resource.target.adapter(task, context)
+            return result, context.pop("_subagent_structured_result", None)
+
+        from api.services.mcp_runtime import McpTool, call_mcp_tool
+        if isinstance(resource.target, McpTool):
+            return call_mcp_tool(self.user_id or "", resource.target, arguments), None
+        schema = getattr(resource.target, "args_schema", None)
+        invoke_args = schema.model_validate(arguments).model_dump() if schema else arguments
+        return resource.target.invoke(invoke_args), None
 
 
 class Guardrails:

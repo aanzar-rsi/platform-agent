@@ -17,7 +17,7 @@ class PreferencesService:
         prefs = body.model_dump(exclude_none=True)
         agent = prefs.get("agent")
         if agent is not None:
-            permitted = {"model_id", "enabled_tools", "enabled_subagents", "confirm_tools",
+            permitted = {"model_id", "confirm_tools",
                           "max_loops", "max_plan_steps", "verbose", "memory_policy_ceiling"}
             if any(key not in permitted for key in agent):
                 raise ValueError("Agent policy must be updated through AgentCore")

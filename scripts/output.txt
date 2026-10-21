@@ -1,0 +1,197 @@
+Latest User Message: Find out all the latest current affairs in France
+
+Recent Context:
+human: Find out all the latest current affairs in France
+
+Prior Plan Context:
+- execution_history (meta only, no result bodies):
+[1]{type,name,task,key,tokens,success}:
+  armory,"",Find latest current affairs in France,plan_s1,783,true
+- execution_memory_index (keys + meta):
+[2]{key,type,name,description,total_tokens,in_context,context_from,context_to,context_complete}:
+  plan_s1,armory,web_search,Find latest current affairs in France,783,true,0,783,true
+  human_message_1,human_input,user,Prior top-level user request,12,true,0,12,true
+- context_memory (visible window):
+budget_tokens: 5000
+used_tokens: 795
+truncated: false
+entries[2]:
+  - key: human_message_1
+    tokens: 12
+    from_token: 0
+    to_token: 12
+    total_tokens: 12
+    content: Find out all the latest current affairs in France
+    complete: true
+    truncated: false
+  - key: plan_s1
+    tokens: 783
+    from_token: 0
+    to_token: 783
+    total_tokens: 783
+    content:
+      success: true
+      provider: duckduckgo
+      query: latest current affairs in France
+      total_results: 10
+      results[10]{title,url,description,source}:
+        Homepage | France Diplomatie,"https://www.diplomatie.gouv.fr/en","Latest news.The Ministry for Europe and Foreign Affairs works to represent, defend and promote the interests of France and French nationals in all areas in foreign countries and international organizations.",DuckDuckGo
+        "Trump On France Protests: “Islam Wanting To Take Over” - YouTube","https://www.youtube.com/watch?v=D5Y_PDERv7Q","Topics covered: France student protests 2026, Trump on France protests, Trump Islam statement, France migration debate, French education crisis, France school protests, police clashes in France, Macron government, European politics, US-France relations and current affairs for...",DuckDuckGo
+        France 24 Schedule Today Tomorrow– News Show... | INTV Schedule,"https://intvschedule.com/channel/france-24/","Find France 24 current schedule for today and tomorrow including program list, show list, business news, world affairs and daily news broadcasts.",DuckDuckGo
+        x.com/francediplo_EN,"https://x.com/francediplo_EN",The French Ministry for Europe and Foreign Affairs.,DuckDuckGo
+        "#currentaffairs #indiafrance #globalpartnership #internationalrelations...","https://www.linkedin.com/posts/shally-malcolm-hr-981220275_currentaffairs-indiafrance-globalpartnership-activity-7430457431077502976-Jl3r","Digital Export: With UPI launching in Israel and a Free Trade Agreement expected by May 2026, our economic ties are set to explode past the $3.6 billion mark. India is no longer just a participant in global affairs; we are the architects of a new, transparent, and powerful counter-block.",DuckDuckGo
+        Daily Current Affairs in English,"https://tr.pinterest.com/ideas/daily-current-affairs-in-english/910000895978/","Read Current Affairs of 2 September 2024 | Current affairs 2024 in english, How to read current affairs for ssc, Daily current affairs.",DuckDuckGo
+        France,"https://www.dw.com/en/france/t-19065412",Something went wrong. We have been notified and are looking into it.,DuckDuckGo
+        RT Live Stream Watch Online for free,"https://tv.ink/rt",Watch RT (Russia Today) Live Stream online for free. Stay updated with the latest news. Access RT's live stream for comprehensive coverage and stay informed.,DuckDuckGo
+        French TV Channels Live Online – Free French TV Guide,"https://tvchannels4all.com/french-tv-channels.html","Whether you are looking for French news, live television from France, regional programming or French-language international channels, browse the list below and select a channel to start watching.",DuckDuckGo
+        "Tears, hugs and continued fight for housing... | Euronews","https://www.euronews.com/2026/10/15/tears-hugs-and-continued-fight-for-housing-madrids-puerta-del-sol-after-two-weeks","After more than two weeks of camping in Puerta del Sol, demonstrators are battling exhaustion and the challenges of living outdoors, while solidarity keeps the protest alive and Madrid's regional government continues to call for their eviction.",DuckDuckGo
+      error: null
+    complete: true
+    truncated: false
+
+Constraints:
+- Do not provide or perform actions intended to harm people, systems, data, or the user.
+- Protect confidential, personal, credential, and proprietary information; disclose it only when explicitly authorized.
+- Do not run elevated, destructive, irreversible, or otherwise dangerous operations without the user's explicit approval.
+- Prefer the least risky effective action, and ask for clarification when authorization or impact is uncertain.
+
+Armory:
+Tools:
+- armory.tool.get_current_datetime_info: Get comprehensive date and time information for the user's current timezone.
+
+Returns current date/time in multiple formats, week/day/month/year components,
+quarter, leap year flag, days remaining in month and year, unix timestamps,
+and UTC offset.
+- armory.tool.system_info: Return comprehensive information about the host system.
+
+Covers OS, CPU, memory, disk, Python runtime, and network hostname.
+Memory and disk stats require psutil; if it is not installed those
+sections are omitted rather than crashing.
+- armory.tool.read_file: Read content from a text-based file.
+
+Supports optional line-range slicing via start_line/end_line and a hard 50 MB
+size cap to prevent memory issues. For very large files use start_line/end_line
+to read sections, or use search_file to find specific content.
+- armory.tool.edit_file: Make targeted edits to a text file by replacing an exact string match.
+
+Finds old_string in the file and replaces it with new_string. By default refuses
+to edit if old_string appears more than once (ambiguous); set replace_all=True to
+replace every occurrence. The match must be exact — whitespace, indentation, and
+line endings must match perfectly. Writes atomically via a temp file so the
+original is never corrupted on a crash.
+- armory.tool.search_file: Search a text file for lines matching a pattern or literal string.
+
+Streams the file line-by-line so memory usage stays flat regardless of file size
+(up to the 100 MB safety cap). Use mode='literal' for plain-text searches and
+mode='regex' for full regular expression power. context_lines works like grep -C.
+- armory.tool.web_search: Search the web and return a list of results with titles, URLs, and descriptions.
+
+Uses Brave Search (set BRAVE_SEARCH_API_KEY in .env) for full web search results.
+Falls back to DuckDuckGo web search (via ddgs library) when no API key is configured —
+provides full web search results without requiring any API keys.
+- armory.tool.decompose_query: Decompose a user query into a structured multi-dimensional breakdown.
+
+Produces intent, sub-tasks, assumptions, ambiguities, constraints, required
+context, expected output format, complexity level, and a suggested approach.
+Use this before planning or executing complex requests to build full situational
+awareness of what the user actually needs.
+- armory.tool.execute_bash: Execute a Bash command and return stdout, stderr, and the return code.
+
+Runs via the system Bash binary. On Windows this requires WSL or Git Bash
+to be on PATH. Dangerous patterns (e.g. rm -rf /) are blocked at validation.
+Output is capped at 10 MB to prevent memory issues.
+- armory.tool.execute_powershell: Execute a PowerShell command and return stdout, stderr, and the return code.
+
+Uses 'pwsh' (PowerShell 7+) if available, falls back to 'powershell' (Windows
+PowerShell 5). Dangerous patterns are blocked at validation. Output is capped
+at 10 MB to prevent memory issues.
+- armory.tool.execute_python_script: Execute a Python script in a subprocess and return stdout, stderr, and the return code.
+
+The script runs in the project virtual environment's Python interpreter when
+available, but as a separate child process so it cannot affect the agent's runtime state. If requirements
+are provided they are pip-installed into a temporary directory that is added to
+the child's PYTHONPATH — the main environment is never modified.
+Output is capped at 10 MB to prevent memory issues.
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_VENDOR_CREATE: toy_erp: Add vendor. Pass JSON arguments using .... Schema: {"properties": {"name": {"title": "Name", "type": "string"}, "contact_email": {"default": "", "title": "Contact Email", "type": "string"}, "address": {"default": "", "title": "Address", "type": "string"}, "payment_terms": {"default": "NET30", "title": "Payment Terms", "type": "string"}}, "required": ["name"], "type": "object", "title": "BAPI_VENDOR_CREATEArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_VENDOR_GETDETAIL: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"vendor_id": {"title": "Vendor Id", "type": "integer"}}, "required": ["vendor_id"], "type": "object", "title": "BAPI_VENDOR_GETDETAILArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_VENDOR_GETLIST: toy_erp: Check vendors. Pass JSON arguments using .... Schema: {"properties": {"status": {"default": null, "title": "Status", "type": "string"}}, "type": "object", "title": "BAPI_VENDOR_GETLISTArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_MATERIAL_CREATE: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"description": {"title": "Description", "type": "string"}, "uom": {"default": "EA", "title": "Uom", "type": "string"}, "unit_price": {"default": 0.0, "title": "Unit Price", "type": "number"}, "category": {"default": "", "title": "Category", "type": "string"}}, "required": ["description"], "type": "object", "title": "BAPI_MATERIAL_CREATEArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_MATERIAL_GETLIST: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"category": {"default": null, "title": "Category", "type": "string"}}, "type": "object", "title": "BAPI_MATERIAL_GETLISTArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_MATERIAL_STOCK_GETLIST: toy_erp: Check stock. Pass JSON arguments using .... Schema: {"properties": {"material_id": {"default": null, "title": "Material Id", "type": "integer"}, "plant": {"default": null, "title": "Plant", "type": "string"}}, "type": "object", "title": "BAPI_MATERIAL_STOCK_GETLISTArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_GOODSMVT_CREATE: toy_erp: Post a goods receipt against a PO; increases on-hand stock. Pass JSON arguments using .... Schema: {"properties": {"po_id": {"title": "Po Id", "type": "integer"}, "material_id": {"title": "Material Id", "type": "integer"}, "qty": {"title": "Qty", "type": "number"}}, "required": ["po_id", "material_id", "qty"], "type": "object", "title": "BAPI_GOODSMVT_CREATEArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_PO_CHANGE: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"po_id": {"title": "Po Id", "type": "integer"}, "status": {"title": "Status", "type": "string"}}, "required": ["po_id", "status"], "type": "object", "title": "BAPI_PO_CHANGEArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_PO_CREATE: toy_erp: Place order. items: [{"material_id": int, "qty": float, "unit_price": float?}] Pass JSON arguments using .... Schema: {"properties": {"vendor_id": {"title": "Vendor Id", "type": "integer"}, "items": {"items": {}, "title": "Items", "type": "array"}}, "required": ["vendor_id", "items"], "type": "object", "title": "BAPI_PO_CREATEArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_PO_GETDETAIL: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"po_id": {"title": "Po Id", "type": "integer"}}, "required": ["po_id"], "type": "object", "title": "BAPI_PO_GETDETAILArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_PO_GETLIST: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"vendor_id": {"default": null, "title": "Vendor Id", "type": "integer"}, "status": {"default": null, "title": "Status", "type": "string"}}, "type": "object", "title": "BAPI_PO_GETLISTArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_CUSTOMER_CREATE: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"name": {"title": "Name", "type": "string"}, "address": {"default": "", "title": "Address", "type": "string"}, "credit_limit": {"default": 10000.0, "title": "Credit Limit", "type": "number"}}, "required": ["name"], "type": "object", "title": "BAPI_CUSTOMER_CREATEArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_CUSTOMER_GETLIST: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"status": {"default": null, "title": "Status", "type": "string"}}, "type": "object", "title": "BAPI_CUSTOMER_GETLISTArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_SALESORDER_CREATE: toy_erp: items: [{"material_id": int, "qty": float, "unit_price": float?}]. Decrements stock. Pass JSON arguments using .... Schema: {"properties": {"customer_id": {"title": "Customer Id", "type": "integer"}, "items": {"items": {}, "title": "Items", "type": "array"}}, "required": ["customer_id", "items"], "type": "object", "title": "BAPI_SALESORDER_CREATEArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_SALESORDER_GETLIST: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"customer_id": {"default": null, "title": "Customer Id", "type": "integer"}, "status": {"default": null, "title": "Status", "type": "string"}}, "type": "object", "title": "BAPI_SALESORDER_GETLISTArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_AP_PAYMENT_POST: toy_erp: Make payment (vendor invoice). Pass JSON arguments using .... Schema: {"properties": {"invoice_id": {"title": "Invoice Id", "type": "integer"}, "amount": {"title": "Amount", "type": "number"}, "method": {"default": "TRANSFER", "title": "Method", "type": "string"}}, "required": ["invoice_id", "amount"], "type": "object", "title": "BAPI_AP_PAYMENT_POSTArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_AR_INVOICE_CREATE: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"customer_id": {"title": "Customer Id", "type": "integer"}, "amount": {"title": "Amount", "type": "number"}, "reference": {"default": "", "title": "Reference", "type": "string"}, "due_date": {"default": null, "title": "Due Date", "type": "string"}}, "required": ["customer_id", "amount"], "type": "object", "title": "BAPI_AR_INVOICE_CREATEArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_AR_PAYMENT_POST: toy_erp: Receive payment (customer invoice). Pass JSON arguments using .... Schema: {"properties": {"invoice_id": {"title": "Invoice Id", "type": "integer"}, "amount": {"title": "Amount", "type": "number"}, "method": {"default": "TRANSFER", "title": "Method", "type": "string"}}, "required": ["invoice_id", "amount"], "type": "object", "title": "BAPI_AR_PAYMENT_POSTArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_GL_ACCOUNT_GETLIST: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {}, "type": "object", "title": "BAPI_GL_ACCOUNT_GETLISTArguments"}
+- armory.tool.mcp_468c2964_4d4f_4239_a286_feda6ab4796f_BAPI_INCOMINGINVOICE_CREATE: toy_erp:  Pass JSON arguments using .... Schema: {"properties": {"vendor_id": {"title": "Vendor Id", "type": "integer"}, "amount": {"title": "Amount", "type": "number"}, "reference": {"default": "", "title": "Reference", "type": "string"}, "due_date": {"default": null, "title": "Due Date", "type": "string"}}, "required": ["vendor_id", "amount"], "type": "object", "title": "BAPI_INCOMINGINVOICE_CREATEArguments"}
+Control Actions:
+- spawn_children: start one or more child agent runs
+- collect_child: collect one running child result
+- context_select: load execution_memory window into context
+- ask_user: ask user for required missing detail
+- finish: return final answer to user
+
+Plan rules:
+- Return up to 8 steps.
+- Use ordered phases; phases are sequential, steps within a phase are parallel.
+- Every phase has consecutive integer sequence starting at 1, and a nonempty steps array.
+- Every step has a unique id, action, name, task, parameters object, uses array (empty if none), and child_calls array (empty if none).
+- Actions: armory_call, spawn_children, collect_child, context_select, ask_user, finish.
+- armory_call requires resource_type (`tool` or `subagent`) and an exact name listed in Armory.
+- `steps_json` must be a JSON object with top-level key `phases`.
+- Do not wrap `steps_json` in CDATA, markdown fences, or any prose.
+- `steps_json` must be parseable by strict JSON parsers:
+  - Escape newlines inside strings as `\\
+`.
+  - Escape inner quotes inside strings as `\\"`.
+  - Do not include trailing commas.
+  - Do not include comments.
+- Required parameter keys by action:
+  - ask_user -> parameters.question (non-empty string). Do NOT use parameters.prompt.
+  - finish -> parameters.answer (string).
+  - context_select -> parameters.key (string).
+  - collect_child -> parameters.child_agent_id (string) when name is not provided.
+  - spawn_children -> child_calls must be a non-empty array.
+- To run children in parallel, use ONE spawn_children step containing all child task objects in child_calls.
+- Each child_calls item must be an object with a non-empty task. Do not use strings and do not invent child_agent_id values.
+- A plan containing spawn_children MUST end immediately after that spawn_children phase. Do not plan collect_child or finish yet; runtime-generated child IDs will be available when the agent replans.
+- If execution_history already contains child_agent entries, NEVER spawn replacements. Collect pending child IDs, or use context_select for existing execution_memory keys.
+- If execution_history/execution_memory_index already contain completed data for this turn, prefer context_select + synthesis over repeating tool/subagent calls.
+- execution_memory_index lists every stored key and description. Values are available only through context_memory; use context_select when a required range is absent or incomplete.
+- Do not add planning/decomposition tool steps. Planning is your job; only call exact tool names listed in Armory.
+- armory_call must address an available `armory..` resource.
+- uses may reference IDs from earlier phases only. If you need a result to fill an argument, plan a later round after reading it; do not guess values.
+- Parallel phases may contain only independent armory_call steps. Put confirmation-requiring tools and mutating actions alone.
+- Every context_select must be alone in its own sequential phase. After the last context_select, stop the plan so the agent can replan with the loaded values.
+- ask_user must be alone in its phase. finish must be alone in the final phase, with parameters.answer containing a response you can write now, without future tool results.
+- For tasks requiring tool results not yet known, stop after gathering data. The agent will replan with the results.
+- Keep steps minimal, use only armory resources, and give no imagined results.
+
+Valid examples (JSON only, no prose):
+Example A - one tool then finish:
+{"phases":[{"sequence":1,"steps":[{"id":"s1","action":"armory_call","resource_type":"tool","name":"system_info","task":"Get system details","parameters":{},"uses":[],"child_calls":[]}]},{"sequence":2,"steps":[{"id":"s2","action":"finish","resource_type":null,"name":"","task":"Return answer","parameters":{"answer":"System info collected."},"uses":[],"child_calls":[]}]}]}
+
+Example B - load memory keys sequentially, then stop so loaded values can be synthesized:
+{"phases":[{"sequence":1,"steps":[{"id":"s1","action":"context_select","name":"","task":"Load Tokyo weather","parameters":{"key":"plan_step1_tokyo"},"uses":[],"child_calls":[]}]},{"sequence":2,"steps":[{"id":"s2","action":"context_select","name":"","task":"Load Dubai weather","parameters":{"key":"plan_step2_dubai"},"uses":[],"child_calls":[]}]}]}
+
+Example C - spawn children (must stop after this phase):
+{"phases":[{"sequence":1,"steps":[{"id":"s1","action":"spawn_children","name":"spawn_weather","task":"Fetch weather in parallel","parameters":{},"uses":[],"child_calls":[{"task":"Fetch current weather for Tokyo"},{"task":"Fetch current weather for Hyderabad"}]}]}]}
+
+Output strictly in XML and include no extra text.
+
+False
+plan
+planning rationale
+overall task
+
+    planner
+
+        JSON object with phases array; each phase has sequence and steps array. Each step has id, action, name, task, parameters, uses, child_calls.

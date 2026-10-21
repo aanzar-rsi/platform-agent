@@ -46,6 +46,7 @@ TEMPLATES = {
     "planner_agent": (_MAIN, {
         "persona", "user_query", "conversation", "current_task", "execution_history",
         "execution_memory_index", "context_memory", "constraints", "armory", "max_plan_steps", "child_mode",
+        "planner_error",
     }),
     "extract_tool_chunks": (_LEARNER, {"user_query", "messages_summary", "execution_history"}),
 }
@@ -162,10 +163,9 @@ REQUIRED_RULES = [
     "context_selector",
     "from_token",
     "ask_user",
-    "agent_call",
+    "armory_call",
     "spawn_children",
     "child_calls",
-    "tool_call",
     "FIFO",
     "truncated",
     "Markdown",
@@ -299,7 +299,19 @@ class TestFastPrompt(unittest.TestCase):
         self.assertNotIn("Armory:", combined)
         self.assertNotIn("Tools:", combined)
         self.assertNotIn("Subagents:", combined)
-        self.assertIn("Never output tool_call", combined)
+        self.assertIn("action: `planner` or `exit`", combined)
+        self.assertNotIn("planner_exit", combined)
+
+    def test_fast_prompt_uses_light_output_contract(self):
+        _, user = load_prompt(
+            "fast_agent",
+            {"persona": "assistant", "user_query": "hey", "conversation": ""},
+            prompts_dir=_MAIN,
+        )
+        self.assertIn("<action>planner</action>", user)
+        self.assertIn("<action>exit</action>", user)
+        self.assertNotIn("<task>", user)
+        self.assertNotIn("<planner_exit>", user)
 
 
 if __name__ == "__main__":

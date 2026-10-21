@@ -16,10 +16,9 @@ from langgraph.graph import END
 from langchain_core.messages import HumanMessage
 
 from src.agent.edges.routing import (
+    ARMORY_NODE,
     CHILD_AGENT_NODE,
     CONTEXT_SELECTOR_NODE,
-    SUBAGENT_NODE,
-    TOOL_NODE,
     route_from_agent,
     route_from_input_gate,
 )
@@ -35,8 +34,6 @@ from src.agent.memory import (
 )
 from src.agent.nodes.agentnode import _format_conversation, _latest_human_content, _parse_response, _run_stream
 from src.agent.nodes.context_selector import context_selector_node
-from src.agent.nodes.subagentnode import subagent_node
-from src.agent.nodes.toolnode import tool_node
 from src.models.llm_client import count_tokens
 from src.prompts.prompt_loader import agentnode_prompt_loader, to_toon
 import toons
@@ -413,13 +410,8 @@ class TestContextSelectorNode(unittest.TestCase):
 
 
 class TestRouting(unittest.TestCase):
-    def test_tool(self):
-        self.assertEqual(route_from_agent({"next_step": {"action": "tool"}}), TOOL_NODE)
-
-    def test_subagent(self):
-        self.assertEqual(
-            route_from_agent({"next_step": {"action": "subagent"}}), SUBAGENT_NODE
-        )
+    def test_armory(self):
+        self.assertEqual(route_from_agent({"next_step": {"action": "armory"}}), ARMORY_NODE)
 
     def test_child_agent(self):
         self.assertEqual(
@@ -442,8 +434,7 @@ class TestRouting(unittest.TestCase):
         self.assertEqual(route_from_agent({"next_step": {"action": "nope"}}), END)
 
     def test_input_gate_reuses_action_map(self):
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "tool"}}), TOOL_NODE)
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "subagent"}}), SUBAGENT_NODE)
+        self.assertEqual(route_from_input_gate({"next_step": {"action": "armory"}}), ARMORY_NODE)
         self.assertEqual(route_from_input_gate({"next_step": {"action": "child_agent"}}), CHILD_AGENT_NODE)
         self.assertEqual(route_from_input_gate({"next_step": {"action": "context_select"}}), CONTEXT_SELECTOR_NODE)
         self.assertEqual(route_from_input_gate({"next_step": {"action": "finish"}}), END)
@@ -469,6 +460,20 @@ class TestAgentParseResponse(unittest.TestCase):
             update["messages"][0].additional_kwargs["ui_step"],
             {"type": "reasoning", "content": "Checking results"},
         )
+
+    def test_new_exit_response_streams_data_as_output(self):
+        visible = []
+        buffer = _run_stream(
+            iter([
+                "<action>exit</action><reasoning>Complete</reasoning>",
+                "<data>Final answer</data>",
+            ]),
+            lambda text, channel: visible.append((text, channel)),
+        )
+        update = _parse_response(buffer, turn_start=False)
+
+        self.assertEqual(visible, [("Complete", "reasoning"), ("Final answer", "output")])
+        self.assertEqual(update["next_step"], {"action": "finish", "answer": "Final answer"})
 
     def test_stream_does_not_emit_partial_closing_xml_tag(self):
         visible = []
@@ -506,7 +511,7 @@ class TestAgentParseResponse(unittest.TestCase):
     def test_context_select_via_name_only(self):
         buf = """
         <planner_exit>False</planner_exit>
-        <action>tool_call</action>
+        <action>armory_call</action>
         <reasoning>reload</reasoning>
         <task>window</task>
         <data>
@@ -522,22 +527,23 @@ class TestAgentParseResponse(unittest.TestCase):
         self.assertEqual(update["next_step"]["key"], "tool_1")
         self.assertIsNone(update["next_step"]["to_token"])
 
-    def test_tool_call_not_confused_with_selector(self):
+    def test_armory_call_not_confused_with_selector(self):
         buf = """
         <planner_exit>False</planner_exit>
-        <action>tool_call</action>
+        <action>armory_call</action>
         <reasoning>read</reasoning>
         <task>load</task>
         <data>
             <name>read_file</name>
             <parameters>
+                <resource_type>tool</resource_type>
                 <path>a.csv</path>
             </parameters>
         </data>
         """
         update = _parse_response(buf, turn_start=False)
-        self.assertEqual(update["next_step"]["action"], "tool")
-        self.assertEqual(update["next_step"]["tool_name"], "read_file")
+        self.assertEqual(update["next_step"]["action"], "armory")
+        self.assertEqual(update["next_step"]["resource_name"], "read_file")
 
     def test_restart_clears_context_memory(self):
         buf = """
@@ -717,134 +723,36 @@ class TestToonTokenSavings(unittest.TestCase):
         self.assertNotIn('{\n  "key": "tool_1"', user)
 
 
-class TestToolAndSubagentIngest(unittest.TestCase):
-    def test_duplicate_successful_tool_call_is_allowed(self):
-        fake_tool = MagicMock()
-        fake_tool.name = "lookup"
-        fake_tool.args_schema = None
+class TestArmoryIngest(unittest.TestCase):
+    def test_armory_result_is_recorded_and_ingested(self):
+        from src.agent.nodes.armory_node import armory_node
 
-        with patch("src.agent.nodes.toolnode._TOOL_MAP", {"lookup": fake_tool}):
-            out = tool_node(
-                {
-                    "next_step": {"tool_name": "lookup", "tool_args": {"q": "x"}, "task": "again"},
-                    "execution_history": [
-                        {
-                            "type": "tool",
-                            "tool_name": "lookup",
-                            "tool_args": {"q": "x"},
-                            "key": "tool_1",
-                            "success": True,
-                            "result": {"success": True, "value": "done"},
-                        }
-                    ],
-                    "execution_memory": {},
-                    "context_memory": empty_context_memory(),
-                    "current_task": "again",
-                }
-            )
-        fake_tool.invoke.assert_called_once_with({"q": "x"})
+        with patch("src.agent.nodes.armory_node.Armory.get", return_value=MagicMock(confirmation_required=False)), \
+             patch("src.agent.nodes.armory_node.Armory.call", return_value=({"success": True, "value": "done"}, None)):
+            out = armory_node({
+                "next_step": {"action": "armory", "resource_type": "tool",
+                              "resource_name": "lookup", "arguments": {"q": "x"}, "task": "once"},
+                "execution_history": [], "execution_memory": {},
+                "context_memory": empty_context_memory(), "current_task": "once",
+            })
         self.assertTrue(out["execution_history"][-1]["success"])
+        self.assertEqual(out["execution_history"][-1]["resource"], "armory.tool.lookup")
+        self.assertIn("armory_1", out["execution_memory"])
 
-    def test_second_web_search_is_allowed_when_query_changes(self):
-        fake_tool = MagicMock()
-        fake_tool.name = "web_search"
-        fake_tool.args_schema = None
+    def test_armory_oversized_result_truncates_in_context(self):
+        from src.agent.nodes.armory_node import armory_node
 
-        with patch("src.agent.nodes.toolnode._TOOL_MAP", {"web_search": fake_tool}):
-            out = tool_node(
-                {
-                    "next_step": {
-                        "tool_name": "web_search",
-                        "tool_args": {"query": "Hyderabad weather now"},
-                        "task": "refresh",
-                    },
-                    "execution_history": [
-                        {
-                            "type": "tool",
-                            "tool_name": "web_search",
-                            "tool_args": {"query": "Hyderabad weather"},
-                            "key": "tool_1",
-                            "success": True,
-                            "result": {"success": True, "results": ["28 C"]},
-                        }
-                    ],
-                    "execution_memory": {},
-                    "context_memory": empty_context_memory(),
-                    "current_task": "refresh",
-                }
-            )
-        fake_tool.invoke.assert_called_once_with({"query": "Hyderabad weather now"})
-        self.assertTrue(out["execution_history"][-1]["success"])
-
-    def test_success_flag_is_stored_in_history(self):
-        fake_tool = MagicMock()
-        fake_tool.name = "lookup"
-        fake_tool.args_schema = None
-        fake_tool.invoke.return_value = {"success": True, "value": "done"}
-        with patch("src.agent.nodes.toolnode._TOOL_MAP", {"lookup": fake_tool}):
-            out = tool_node(
-                {
-                    "next_step": {"tool_name": "lookup", "tool_args": {}, "task": "once"},
-                    "execution_history": [],
-                    "execution_memory": {},
-                    "context_memory": empty_context_memory(),
-                    "current_task": "once",
-                }
-            )
-        self.assertTrue(out["execution_history"][-1]["success"])
-
-    def test_unknown_tool_auto_ingests_and_stubs_message(self):
-        state = {
-            "next_step": {"tool_name": "no_such_tool", "tool_args": {}, "task": "x"},
-            "execution_history": [],
-            "execution_memory": {},
-            "context_memory": empty_context_memory(),
-            "current_task": "x",
-        }
-        out = tool_node(state)
-        self.assertIn("tool_1", out["execution_memory"])
-        self.assertEqual(out["context_memory"]["entries"][0]["key"], "tool_1")
-        msg = out["messages"][0].content
-        self.assertIn("Tool 'no_such_tool' result:", msg)
-        self.assertIn("Unknown tool", msg)
-        self.assertFalse(out["execution_memory"]["tool_1"]["success"])
-
-    def test_tool_oversized_result_truncates_in_context(self):
         huge = _tokens_of_chars(CONTEXT_MEMORY_BUDGET + 100)
-        fake_tool = MagicMock()
-        fake_tool.name = "huge_tool"
-        fake_tool.args_schema = None
-        fake_tool.invoke.return_value = huge
-
-        with patch("src.agent.nodes.toolnode._TOOL_MAP", {"huge_tool": fake_tool}):
-            out = tool_node(
-                {
-                    "next_step": {"tool_name": "huge_tool", "tool_args": {}, "task": "t"},
-                    "execution_history": [],
-                    "execution_memory": {},
-                    "context_memory": empty_context_memory(),
-                    "current_task": "t",
-                }
-            )
-        # full payload retained in execution_memory
-        self.assertEqual(out["execution_memory"]["tool_1"]["result"], huge)
+        with patch("src.agent.nodes.armory_node.Armory.get", return_value=MagicMock(confirmation_required=False)), \
+             patch("src.agent.nodes.armory_node.Armory.call", return_value=(huge, None)):
+            out = armory_node({
+                "next_step": {"action": "armory", "resource_type": "tool",
+                              "resource_name": "huge", "arguments": {}, "task": "t"},
+                "execution_history": [], "execution_memory": {},
+                "context_memory": empty_context_memory(), "current_task": "t",
+            })
+        self.assertEqual(out["execution_memory"]["armory_1"]["result"], huge)
         self.assertTrue(out["context_memory"]["truncated"])
-        self.assertLessEqual(out["context_memory"]["used_tokens"], CONTEXT_MEMORY_BUDGET)
-        self.assertFalse(out["context_memory"]["entries"][0]["complete"])
-
-    def test_subagent_unknown_auto_ingests(self):
-        out = subagent_node(
-            {
-                "next_step": {"agent_name": "ghost", "task": "do"},
-                "execution_history": [],
-                "execution_memory": {},
-                "context_memory": empty_context_memory(),
-                "preloaded_context": {},
-            }
-        )
-        self.assertIn("subagent_1", out["execution_memory"])
-        self.assertEqual(out["context_memory"]["entries"][0]["key"], "subagent_1")
-        self.assertIn("Subagent 'ghost' result:", out["messages"][0].content)
 
     def test_fifo_trims_only_needed_prefix(self):
         cm = empty_context_memory(100)

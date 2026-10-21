@@ -17,8 +17,7 @@ export const CHECKPOINT_PRIMARY_BTN =
 const NODE_STYLE: Record<string, { color: string; icon: typeof MessageSquare; label: string }> = {
   start: { color: "#525252", icon: MessageSquare, label: "User message" },
   agent_node: { color: "#fbe232", icon: MessageSquare, label: "Agent" },
-  tool_node: { color: "#3d9b7a", icon: Wrench, label: "Tool" },
-  subagent_node: { color: "#fbe232", icon: MessageSquare, label: "Subagent" },
+  armory_node: { color: "#3d9b7a", icon: Wrench, label: "Armory" },
   subagent_gate: { color: "#fbe232", icon: MessageSquare, label: "Subagent (confirmed)" },
   context_selector: { color: "#525252", icon: RefreshCw, label: "Context select" },
   unknown: { color: "#737373", icon: GitBranch, label: "Step" },
@@ -77,7 +76,7 @@ export function CheckpointActionPanel({
       onPointerDown={(e) => e.stopPropagation()}
     >
       <div className="mb-1.5 flex items-center gap-1.5 font-semibold" style={{ color: style.color }}>
-        {node.node === "agent_node" || node.node === "subagent_node" || node.node === "subagent_gate"
+        {node.node === "agent_node" || node.node === "armory_node" || node.node === "subagent_gate"
            ? <img src="/brain_icon.svg" alt="" width={14} height={14} className="h-3.5 w-3.5" />
           : <Icon className="h-3.5 w-3.5" />}
         {style.label}

@@ -60,3 +60,8 @@ class PlanExecuteState(TypedDict):
     plan_event: Dict[str, Any]
     step_events: List[dict[str, Any]]
     phase_step_results: Annotated[list[dict[str, Any]], merge_phase_results]
+    planner_response: str
+    planner_response_type: str
+    planner_error: Dict[str, Any]
+    planner_resources: List[dict[str, str]]
+    planner_mode: bool

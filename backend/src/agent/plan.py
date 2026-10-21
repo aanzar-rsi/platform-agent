@@ -13,7 +13,8 @@ class PlanStep(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     id: str = Field(min_length=1)
-    action: Literal["tool_call", "agent_call", "spawn_children", "collect_child", "context_select", "ask_user", "finish"]
+    action: Literal["armory_call", "spawn_children", "collect_child", "context_select", "ask_user", "finish"]
+    resource_type: Literal["tool", "subagent"] | None = None
     name: str = ""
     task: str = ""
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -31,6 +32,7 @@ class PlanPhase(BaseModel):
 class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    batch_name: str = ""
     phases: list[PlanPhase] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -100,7 +102,7 @@ def _escape_unescaped_quotes_in_json_strings(text: str) -> str:
     return "".join(out)
 
 
-def parse_plan(raw: str, *, max_plan_steps: int, tools: set[str], subagents: set[str]) -> list[dict]:
+def parse_plan(raw: str, *, max_plan_steps: int, resources: set[tuple[str, str]]) -> list[dict]:
     """Reject the entire plan if any step is invalid or exceeds the runtime limit."""
     if max_plan_steps < 1:
         raise ValueError("max_plan_steps must be positive")
@@ -208,7 +210,8 @@ def parse_plan(raw: str, *, max_plan_steps: int, tools: set[str], subagents: set
                 if isinstance(uses, list):
                     # Some planner responses put resource names in `uses`; that
                     # field is only for IDs produced by earlier phases.
-                    step["uses"] = [value for value in uses if value not in tools | subagents]
+                    resource_names = {name for _, name in resources}
+                    step["uses"] = [value for value in uses if value not in resource_names]
                 if isinstance(step.get("task"), dict):
                     task = step["task"]
                     step["task"] = str(task.get("description") or task.get("notes") or json.dumps(task))
@@ -302,20 +305,11 @@ def parse_plan(raw: str, *, max_plan_steps: int, tools: set[str], subagents: set
         raise ValueError("plan exceeds max_plan_steps")
     for phase in plan.phases:
         for step in phase.steps:
-            if step.action == "tool_call" and step.name not in tools:
-                declared = step.parameters.get("tool")
-                compact_name = "".join(character for character in step.name.lower() if character.isalnum())
-                matches = ([declared] if isinstance(declared, str) and declared in tools else [
-                    tool for tool in tools
-                    if "".join(character for character in tool.lower() if character.isalnum()) in compact_name
-                ])
-                if len(matches) == 1:
-                    step.name = matches[0]
-                    step.parameters.pop("tool", None)
-                else:
-                    raise ValueError(f"unavailable tool: {step.name}")
-            if step.action == "agent_call" and step.name not in subagents:
-                raise ValueError(f"unavailable subagent: {step.name}")
+            if step.action == "armory_call":
+                if not step.resource_type:
+                    raise ValueError("armory_call requires resource_type")
+                if (step.resource_type, step.name) not in resources:
+                    raise ValueError(f"unavailable armory resource: {step.resource_type}.{step.name}")
             if step.action == "spawn_children" and not step.child_calls:
                 raise ValueError("spawn_children requires child_calls")
             if step.action == "collect_child" and not (step.parameters.get("child_agent_id") or step.name):
@@ -328,9 +322,9 @@ def parse_plan(raw: str, *, max_plan_steps: int, tools: set[str], subagents: set
                 raise ValueError("finish requires a literal answer")
             if step.action == "finish" and step.uses:
                 raise ValueError("finish cannot assume unavailable step results; replan after execution")
-            if len(phase.steps) > 1 and step.action not in {"tool_call", "agent_call"}:
-                raise ValueError("only tool and subagent steps may run in parallel")
-            if len(phase.steps) > 1 and step.action == "tool_call" and step.name in {
+            if len(phase.steps) > 1 and step.action != "armory_call":
+                raise ValueError("only armory steps may run in parallel")
+            if len(phase.steps) > 1 and step.action == "armory_call" and step.resource_type == "tool" and step.name in {
                 "edit_file", "execute_bash", "execute_powershell", "execute_python_script",
             }:
                 raise ValueError("confirmation-requiring tools must run alone")

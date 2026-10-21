@@ -346,24 +346,14 @@ class AgentRuntime:
                             if updates.get("plan_event", {}).get("kind") == "phase.finished":
                                 event_writer.enqueue("plan.phase.finished", updates["plan_event"])
 
-                        # Emit *.started only from agent_node's next_step decision.
-                        # Emitting on the executor node name would duplicate the event
-                        # when tool_node / subagent_node finish (they don't return next_step).
-                        if node_name == "agent_node" and action == "tool":
+                        if node_name == "agent_node" and action == "armory":
+                            resource_type = next_step.get("resource_type")
                             event_writer.enqueue(
-                                "tool.started",
+                                "subagent.started" if resource_type == "subagent" else "tool.started",
                                 {
-                                    "tool_name": next_step.get("tool_name"),
-                                    "tool_args": next_step.get("tool_args"),
-                                    "task": next_step.get("task"),
-                                },
-                            )
-                        if node_name == "agent_node" and action == "subagent":
-                            event_writer.enqueue(
-                                "subagent.started",
-                                {
-                                    "agent_name": next_step.get("agent_name"),
-                                    "tool_args": next_step.get("tool_args"),
+                                    ("agent_name" if resource_type == "subagent" else "tool_name"):
+                                        next_step.get("resource_name"),
+                                    "tool_args": next_step.get("arguments"),
                                     "task": next_step.get("task"),
                                 },
                             )
@@ -375,29 +365,24 @@ class AgentRuntime:
                                         if node_name == "collect_child" else hist[-1])
                                 if last is None:
                                     pass
-                                elif last.get("type") == "tool":
+                                elif last.get("type") == "armory" and last.get("resource_type") == "tool":
                                     event_writer.enqueue(
                                         "tool.finished",
                                         {
-                                            "tool_name": last.get("tool_name"),
-                                            "tool_args": last.get("tool_args"),
+                                            "tool_name": last.get("resource_name"),
+                                            "tool_args": last.get("arguments"),
                                             "task": last.get("task"),
                                             "result": _truncate(last.get("result")),
-                                            "success": bool(
-                                                isinstance(last.get("result"), dict)
-                                                and last["result"].get("success", True)
-                                            ),
+                                            "success": bool(last.get("success", True)),
                                         },
                                     )
-                                elif last.get("type") == "subagent":
-                                    if node_name != "collect_child" or last.get("status") != "running":
-                                        event_writer.enqueue(
-                                            "subagent.started" if last.get("status") == "running" else "subagent.finished",
-                                            {"child_agent_id": last.get("child_agent_id"),
-                                             "agent_name": last.get("agent_name"), "task": last.get("task"),
-                                             "result": _truncate(last.get("result")),
-                                             "success": bool(last.get("success", True))},
-                                        )
+                                elif last.get("type") == "armory" and last.get("resource_type") == "subagent":
+                                    event_writer.enqueue(
+                                        "subagent.finished",
+                                        {"agent_name": last.get("resource_name"), "task": last.get("task"),
+                                         "result": _truncate(last.get("result")),
+                                         "success": bool(last.get("success", True))},
+                                    )
                                 elif last.get("type") == "child_agent":
                                     if node_name != "child_agent_node" and (
                                         node_name != "collect_child" or last.get("status") != "running"
@@ -422,8 +407,8 @@ class AgentRuntime:
                                 "node": node_name,
                                 "next_step": {
                                     "action": action,
-                                    "tool_name": next_step.get("tool_name"),
-                                    "agent_name": next_step.get("agent_name"),
+                                    "resource_type": next_step.get("resource_type"),
+                                    "resource_name": next_step.get("resource_name"),
                                 }
                                 if next_step
                                 else {},

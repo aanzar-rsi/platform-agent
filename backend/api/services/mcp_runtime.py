@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 TIMEOUT = 15
 RECONNECT_DELAY = 30
 
-from src.agent.policy_schema import armory_resource_allowed
 
 
 class McpConnection:
@@ -255,16 +254,7 @@ def available_mcp_tools(uid: str | None, *, reconnect: bool = False) -> dict[str
         return {}
     from api.core.deps import get_repos
 
-    from src.utils.trace import current_ids, in_run, emit
-
-    allowed_armory = None
-    if in_run():
-        from api.db.repositories.agents import AgentRepository
-
-        record = AgentRepository().get(current_ids()["agent_id"])
-        if not record or current_ids().get("owner_id") != uid:
-            return {}
-        allowed_armory = (record["policy"] or {}).get("armory") or {}
+    from src.utils.trace import in_run, emit
     result = {}
     for server in get_repos().mcp.list(uid):
         if not server["enabled"]:
@@ -281,8 +271,6 @@ def available_mcp_tools(uid: str | None, *, reconnect: bool = False) -> dict[str
             continue
         for tool in conn.tools:
             name = "mcp_" + server["id"].replace("-", "_") + "_" + re.sub(r"\W", "_", tool["name"])
-            if allowed_armory is not None and not armory_resource_allowed(allowed_armory, group="tools", name=name):
-                continue
             result[name] = McpTool(
                 name,
                 f"{server['name']}: {tool.get('description', '')} "
@@ -296,19 +284,6 @@ def available_mcp_tools(uid: str | None, *, reconnect: bool = False) -> dict[str
 
 def call_mcp_tool(uid: str, tool: McpTool, arguments: dict[str, Any]) -> dict[str, Any]:
     from api.core.deps import get_repos
-    from src.utils.trace import current_ids, in_run, emit
-
-    if in_run():
-        from api.db.repositories.agents import AgentRepository
-
-        record = AgentRepository().get(current_ids()["agent_id"])
-        permitted = (record or {}).get("policy", {}).get("armory", {})
-        if not record or current_ids().get("owner_id") != uid or not armory_resource_allowed(permitted, group="tools", name=tool.name):
-            emit("armory.authz.deny", status="denied", error=PermissionError("mcp_tool_denied"),
-                 data={"tool_name": tool.name}, component="mcp_runtime")
-            return {"success": False, "error": "MCP tool is not permitted"}
-        emit("armory.authz.allow", data={"tool_name": tool.name}, component="mcp_runtime")
-
     server = get_repos().mcp.get(uid, tool.server_id)
     conn = mcp_runtime.get(uid, tool.server_id)
     if not server or not server["enabled"] or not conn or tool.remote_name not in {t["name"] for t in conn.tools}:

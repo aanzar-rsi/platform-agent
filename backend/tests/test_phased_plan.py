@@ -10,18 +10,34 @@ from langgraph.graph import END, START, StateGraph
 
 from src.agent.nodes.plan_dispatcher import dispatch_phase, phase_collector_node, plan_dispatcher_node
 from src.agent.plan import parse_plan
+
+
+def test_parse_plan_accepts_batch_name():
+    raw = {
+        "batch_name": "answer-lookup-1",
+        "phases": [{
+            "sequence": 1,
+            "steps": [{
+                "id": "s1", "action": "finish", "resource_type": None,
+                "name": "", "task": "Answer", "parameters": {"answer": "done"},
+                "uses": [], "child_calls": [],
+            }],
+        }],
+    }
+    phases = parse_plan(json.dumps(raw), max_plan_steps=1, resources=set())
+    assert phases[0]["steps"][0]["action"] == "finish"
 from src.agent.state import PlanExecuteState
 
 
 def step(id, name, *, uses=None):
-    return {"id": id, "action": "tool_call", "name": name, "task": id, "parameters": {}, "uses": uses or []}
+    return {"id": id, "action": "armory_call", "resource_type": "tool", "name": name, "task": id, "parameters": {}, "uses": uses or []}
 
 
 def test_plan_validation_rejects_partial_or_unsafe_plans():
     tools = {"first", "second"}
     phases = [{"sequence": 1, "steps": [step("a", "first"), step("b", "second")]},
               {"sequence": 2, "steps": [step("c", "first", uses=["a", "b"])]}]
-    assert len(parse_plan(json.dumps({"phases": phases}), max_plan_steps=3, tools=tools, subagents=set())) == 2
+    assert len(parse_plan(json.dumps({"phases": phases}), max_plan_steps=3, resources={("tool", name) for name in tools})) == 2
     for broken in (
         {"phases": phases},
         {"phases": [{"sequence": 2, "steps": [step("a", "first")]}]},
@@ -30,7 +46,7 @@ def test_plan_validation_rejects_partial_or_unsafe_plans():
         {"phases": [{"sequence": 1, "steps": [step("a", "first", uses=["a"])]}]},
     ):
         with pytest.raises(ValueError):
-            parse_plan(json.dumps(broken), max_plan_steps=2, tools=tools, subagents=set())
+            parse_plan(json.dumps(broken), max_plan_steps=2, resources={("tool", name) for name in tools})
 
 
 def test_parse_plan_accepts_ask_user_prompt_alias_and_normalizes_to_question():
@@ -53,7 +69,7 @@ def test_parse_plan_accepts_ask_user_prompt_alias_and_normalizes_to_question():
             }
         ]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=4, tools=tools, subagents=set())
+    phases = parse_plan(json.dumps(raw), max_plan_steps=4, resources={("tool", name) for name in tools})
     step = phases[0]["steps"][0]
     assert step["parameters"]["question"] == "Which system should I check?"
 
@@ -89,7 +105,7 @@ def test_parse_plan_serializes_context_loads_and_replans_before_finish():
         ]
     }
 
-    phases = parse_plan(json.dumps(raw), max_plan_steps=4, tools=set(), subagents=set())
+    phases = parse_plan(json.dumps(raw), max_plan_steps=4, resources=set())
 
     assert [phase["sequence"] for phase in phases] == [1, 2]
     assert [phase["steps"][0]["id"] for phase in phases] == ["tokyo", "dubai"]
@@ -98,13 +114,13 @@ def test_parse_plan_serializes_context_loads_and_replans_before_finish():
 def test_parse_plan_reports_empty_or_invalid_json_cleanly():
     tools = {"first"}
     with pytest.raises(ValueError, match="steps_json is empty"):
-        parse_plan("", max_plan_steps=2, tools=tools, subagents=set())
+        parse_plan("", max_plan_steps=2, resources={("tool", name) for name in tools})
 
     with pytest.raises(ValueError, match="steps_json is not valid JSON"):
-        parse_plan("not json", max_plan_steps=2, tools=tools, subagents=set())
+        parse_plan("not json", max_plan_steps=2, resources={("tool", name) for name in tools})
 
     with pytest.raises(ValueError, match="validation error|steps_json must be a JSON object"):
-        parse_plan("[]", max_plan_steps=2, tools=tools, subagents=set())
+        parse_plan("[]", max_plan_steps=2, resources={("tool", name) for name in tools})
 
 
 def test_parse_plan_accepts_fenced_json():
@@ -117,7 +133,7 @@ def test_parse_plan_accepts_fenced_json():
       "steps": [
         {
           "id": "a",
-          "action": "tool_call",
+          "action": "armory_call", "resource_type": "tool",
           "name": "first",
           "task": "run",
           "parameters": {},
@@ -129,28 +145,28 @@ def test_parse_plan_accepts_fenced_json():
   ]
 }
 ```"""
-    phases = parse_plan(raw, max_plan_steps=2, tools=tools, subagents=set())
+    phases = parse_plan(raw, max_plan_steps=2, resources={("tool", name) for name in tools})
     assert phases[0]["steps"][0]["id"] == "a"
 
 
 def test_parse_plan_recovers_from_wrapper_text_and_trailing_comma():
     tools = {"first"}
-    raw = """Planner draft:\n{"phases":[{"sequence":1,"steps":[{"id":"a","action":"tool_call","name":"first","task":"run","parameters":{},"uses":[],"child_calls":[],},],},],}\nIgnore above."""
-    phases = parse_plan(raw, max_plan_steps=2, tools=tools, subagents=set())
+    raw = """Planner draft:\n{"phases":[{"sequence":1,"steps":[{"id":"a","action":"armory_call","resource_type":"tool","name":"first","task":"run","parameters":{},"uses":[],"child_calls":[],},],},],}\nIgnore above."""
+    phases = parse_plan(raw, max_plan_steps=2, resources={("tool", name) for name in tools})
     assert phases[0]["steps"][0]["name"] == "first"
 
 
 def test_parse_plan_accepts_literal_newline_in_string_via_lenient_json():
     tools = {"first"}
-    raw = '{"phases":[{"sequence":1,"steps":[{"id":"a","action":"tool_call","name":"first","task":"line1\nline2","parameters":{},"uses":[],"child_calls":[]}]}]}'
-    phases = parse_plan(raw, max_plan_steps=2, tools=tools, subagents=set())
+    raw = '{"phases":[{"sequence":1,"steps":[{"id":"a","action":"armory_call","resource_type":"tool","name":"first","task":"line1\nline2","parameters":{},"uses":[],"child_calls":[]}]}]}'
+    phases = parse_plan(raw, max_plan_steps=2, resources={("tool", name) for name in tools})
     assert phases[0]["steps"][0]["task"].startswith("line1")
 
 
 def test_parse_plan_recovers_from_unescaped_quotes_in_string_values():
     tools = {"first"}
-    raw = '{"phases":[{"sequence":1,"steps":[{"id":"a","action":"tool_call","name":"first","task":"Use "live" weather source","parameters":{},"uses":[],"child_calls":[]}]}]}'
-    phases = parse_plan(raw, max_plan_steps=2, tools=tools, subagents=set())
+    raw = '{"phases":[{"sequence":1,"steps":[{"id":"a","action":"armory_call","resource_type":"tool","name":"first","task":"Use "live" weather source","parameters":{},"uses":[],"child_calls":[]}]}]}'
+    phases = parse_plan(raw, max_plan_steps=2, resources={("tool", name) for name in tools})
     assert phases[0]["steps"][0]["task"] == 'Use "live" weather source'
 
 
@@ -163,7 +179,7 @@ def test_parse_plan_accepts_top_level_phases_list():
                 "steps": [
                     {
                         "id": "a",
-                        "action": "tool_call",
+                        "action": "armory_call", "resource_type": "tool",
                         "name": "first",
                         "task": "run",
                         "parameters": {},
@@ -174,7 +190,7 @@ def test_parse_plan_accepts_top_level_phases_list():
             }
         ]
     )
-    phases = parse_plan(raw, max_plan_steps=2, tools=tools, subagents=set())
+    phases = parse_plan(raw, max_plan_steps=2, resources={("tool", name) for name in tools})
     assert phases[0]["steps"][0]["id"] == "a"
 
 
@@ -198,7 +214,7 @@ def test_parse_plan_normalizes_spawn_children_string_child_calls():
             }
         ]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=4, tools=tools, subagents=set())
+    phases = parse_plan(json.dumps(raw), max_plan_steps=4, resources={("tool", name) for name in tools})
     calls = phases[0]["steps"][0]["child_calls"]
     assert calls == [{"task": "tokyo_child"}, {"task": "hyderabad_child"}]
 
@@ -226,7 +242,7 @@ def test_parse_plan_stops_after_spawn_and_merges_parallel_spawn_steps():
             },
         ]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=8, tools=set(), subagents=set())
+    phases = parse_plan(json.dumps(raw), max_plan_steps=8, resources=set())
     assert len(phases) == 1
     assert len(phases[0]["steps"]) == 1
     assert phases[0]["steps"][0]["child_calls"] == [
@@ -241,7 +257,7 @@ def test_parse_plan_discards_invented_setup_tool_before_spawn():
             {
                 "sequence": 1,
                 "steps": [
-                    {"id": "setup", "action": "tool_call", "name": "decompose_query", "task": "decompose",
+                    {"id": "setup", "action": "armory_call", "resource_type": "tool", "name": "decompose_query", "task": "decompose",
                      "parameters": {}, "uses": [], "child_calls": []},
                 ],
             },
@@ -254,7 +270,7 @@ def test_parse_plan_discards_invented_setup_tool_before_spawn():
             },
         ]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=4, tools=set(), subagents=set())
+    phases = parse_plan(json.dumps(raw), max_plan_steps=4, resources=set())
     assert len(phases) == 1
     assert phases[0]["sequence"] == 1
     assert phases[0]["steps"][0]["action"] == "spawn_children"
@@ -272,7 +288,7 @@ def test_parse_plan_normalizes_phase_alias_to_sequence():
             }
         ]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=2, tools=set(), subagents=set())
+    phases = parse_plan(json.dumps(raw), max_plan_steps=2, resources=set())
     assert phases[0]["sequence"] == 1
     assert "phase" not in phases[0]
 
@@ -294,7 +310,7 @@ def test_parse_plan_normalizes_phase_id_and_structured_child_tasks():
             }
         ]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=2, tools=set(), subagents=set())
+    phases = parse_plan(json.dumps(raw), max_plan_steps=2, resources=set())
     assert phases[0]["sequence"] == 1
     assert phases[0]["steps"][0]["task"] == "Spawn weather agents"
     assert all(isinstance(call["task"], str) for call in phases[0]["steps"][0]["child_calls"])
@@ -306,23 +322,23 @@ def test_parse_plan_drops_tool_names_from_uses():
             {
                 "sequence": 1,
                 "steps": [
-                    {"id": "s1", "action": "tool_call", "name": "web_search", "task": "weather",
+                    {"id": "s1", "action": "armory_call", "resource_type": "tool", "name": "web_search", "task": "weather",
                      "parameters": {"query": "Tokyo weather"}, "uses": ["web_search"], "child_calls": []},
                 ],
             }
         ]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=2, tools={"web_search"}, subagents=set())
+    phases = parse_plan(json.dumps(raw), max_plan_steps=2, resources={("tool", "web_search")})
     assert phases[0]["steps"][0]["uses"] == []
 
 
-def test_parse_plan_normalizes_numeric_ids_and_descriptive_tool_names():
+def test_parse_plan_rejects_descriptive_resource_names():
     raw = {
         "phases": [{
             "sequence": 1,
             "steps": [{
                 "id": 1,
-                "action": "tool_call",
+                "action": "armory_call", "resource_type": "tool",
                 "name": "Fetch weather via web_search",
                 "task": "weather",
                 "parameters": {"query": "Tokyo weather"},
@@ -331,18 +347,17 @@ def test_parse_plan_normalizes_numeric_ids_and_descriptive_tool_names():
             }],
         }]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=2, tools={"web_search"}, subagents=set())
-    assert phases[0]["steps"][0]["id"] == "1"
-    assert phases[0]["steps"][0]["name"] == "web_search"
+    with pytest.raises(ValueError, match="unavailable armory resource"):
+        parse_plan(json.dumps(raw), max_plan_steps=2, resources={("tool", "web_search")})
 
 
-def test_parse_plan_uses_explicit_tool_parameter_alias():
+def test_parse_plan_rejects_tool_parameter_alias():
     raw = {
         "phases": [{
             "sequence": 1,
             "steps": [{
                 "id": "s1",
-                "action": "tool_call",
+                "action": "armory_call", "resource_type": "tool",
                 "name": "WebSearchFetchWeatherTokyo",
                 "task": "weather",
                 "parameters": {"tool": "web_search", "query": "Tokyo weather"},
@@ -351,19 +366,17 @@ def test_parse_plan_uses_explicit_tool_parameter_alias():
             }],
         }]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=2, tools={"web_search"}, subagents=set())
-    step = phases[0]["steps"][0]
-    assert step["name"] == "web_search"
-    assert "tool" not in step["parameters"]
+    with pytest.raises(ValueError, match="unavailable armory resource"):
+        parse_plan(json.dumps(raw), max_plan_steps=2, resources={("tool", "web_search")})
 
 
-def test_parse_plan_matches_tool_names_ignoring_separators():
+def test_parse_plan_rejects_fuzzy_resource_names():
     raw = {
         "phases": [{
             "sequence": 1,
             "steps": [{
                 "id": "s1",
-                "action": "tool_call",
+                "action": "armory_call", "resource_type": "tool",
                 "name": "Web search current weather Tokyo",
                 "task": "weather",
                 "parameters": {"query": "Tokyo weather"},
@@ -372,8 +385,8 @@ def test_parse_plan_matches_tool_names_ignoring_separators():
             }],
         }]
     }
-    phases = parse_plan(json.dumps(raw), max_plan_steps=2, tools={"web_search"}, subagents=set())
-    assert phases[0]["steps"][0]["name"] == "web_search"
+    with pytest.raises(ValueError, match="unavailable armory resource"):
+        parse_plan(json.dumps(raw), max_plan_steps=2, resources={("tool", "web_search")})
 
 
 def test_parallel_phase_fanout_and_ordered_merge(monkeypatch):
@@ -381,14 +394,14 @@ def test_parallel_phase_fanout_and_ordered_merge(monkeypatch):
 
     barrier = threading.Barrier(2)
 
-    def fake_tool(state, config=None):
+    def fake_armory(state, config=None):
         barrier.wait(timeout=2)
-        time.sleep(0.02 if state["next_step"]["tool_name"] == "first" else 0)
+        time.sleep(0.02 if state["next_step"]["resource_name"] == "first" else 0)
         return {"execution_history": [*state["execution_history"],
-                                      {"type": "tool", "result": state["next_step"]["tool_name"], "success": True}],
+                                      {"type": "armory", "resource_type": "tool", "result": state["next_step"]["resource_name"], "success": True}],
                 "messages": []}
 
-    monkeypatch.setattr("src.agent.nodes.toolnode.tool_node", fake_tool)
+    monkeypatch.setattr("src.agent.nodes.armory_node.armory_node", fake_armory)
     graph = StateGraph(PlanExecuteState)
     graph.add_node("plan_dispatcher", plan_dispatcher_node)
     graph.add_node("planned_step", module.planned_step_node)
@@ -412,13 +425,13 @@ def test_dispatcher_runs_sequential_phases_without_reinvoking_agent(monkeypatch)
 
     seen = []
 
-    def fake_tool(state, config=None):
-        seen.append(state["next_step"]["tool_name"])
+    def fake_armory(state, config=None):
+        seen.append(state["next_step"]["resource_name"])
         return {"execution_history": [*state["execution_history"],
-                                      {"type": "tool", "result": seen[-1], "success": True}],
+                                      {"type": "armory", "resource_type": "tool", "result": seen[-1], "success": True}],
                 "messages": []}
 
-    monkeypatch.setattr("src.agent.nodes.toolnode.tool_node", fake_tool)
+    monkeypatch.setattr("src.agent.nodes.armory_node.armory_node", fake_armory)
     graph = StateGraph(PlanExecuteState)
     graph.add_node("plan_dispatcher", plan_dispatcher_node)
     graph.add_node("planned_step", module.planned_step_node)
@@ -441,14 +454,14 @@ def test_parallel_failure_replans_and_does_not_run_later_phase(monkeypatch):
 
     seen = []
 
-    def fake_tool(state, config=None):
-        name = state["next_step"]["tool_name"]
+    def fake_armory(state, config=None):
+        name = state["next_step"]["resource_name"]
         seen.append(name)
         return {"execution_history": [*state["execution_history"],
-                                      {"type": "tool", "result": name, "success": name != "second"}],
+                                      {"type": "armory", "resource_type": "tool", "result": name, "success": name != "second"}],
                 "messages": []}
 
-    monkeypatch.setattr("src.agent.nodes.toolnode.tool_node", fake_tool)
+    monkeypatch.setattr("src.agent.nodes.armory_node.armory_node", fake_armory)
     graph = StateGraph(PlanExecuteState)
     graph.add_node("plan_dispatcher", plan_dispatcher_node)
     graph.add_node("planned_step", module.planned_step_node)

@@ -12,7 +12,6 @@ from src.agent.policy_schema import (
 
 
 def default_policy(runtime: dict | None = None) -> Policy:
-    runtime = runtime or {}
     from src.tools import INTERNAL_TOOLS
     from src.subagents.registry import get_subagents
 
@@ -20,15 +19,17 @@ def default_policy(runtime: dict | None = None) -> Policy:
     subagents = [s.name for s in get_subagents()]
     armory = normalize_armory_policy(
         {
-            "tools": runtime.get("enabled_tools", tools),
-            "subagents": runtime.get("enabled_subagents", subagents),
-            "confirm_tools": True,
             "resources": {
+                "tools": [{"type": "tool", "name": name, "enabled": True} for name in tools],
+                "subagents": [{"type": "subagent", "name": name, "enabled": True} for name in subagents],
                 "mcp_servers": [{"type": "mcp_server", "name": "*", "enabled": True}],
             },
             "groups": {
+                "tools": {"enabled": True},
+                "subagents": {"enabled": True},
                 "mcp_servers": {"enabled": True},
             },
+            "confirm_tools": True,
         }
     )
     memory = normalize_memory_policy({"read": ["USER", "AGENT"], "write": ["USER"], "tenant_id": None})
