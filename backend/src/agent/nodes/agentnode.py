@@ -16,6 +16,7 @@ from src.agent.control import maybe_pause, note_text_from_resume
 from src.agent.memory import (
     build_execution_memory_index,
     empty_context_memory,
+    record_execution,
     slim_execution_history,
 )
 from src.agent.plan import parse_plan
@@ -225,7 +226,8 @@ def _run_stream(stream, on_token=None) -> str:
 
 def _latest_human_content(messages: list[BaseMessage]) -> str:
     for msg in reversed(messages):
-        if getattr(msg, "type", None) == "human":
+        extra = getattr(msg, "additional_kwargs", {}) or {}
+        if getattr(msg, "type", None) == "human" and not extra.get("ui_hidden"):
             return msg.content if isinstance(msg.content, str) else str(msg.content)
     return ""
 
@@ -234,18 +236,21 @@ def _is_turn_start(messages: list[BaseMessage]) -> bool:
     """True on the first agent visit after a new human message this invoke."""
     if not messages:
         return False
-    return getattr(messages[-1], "type", None) == "human"
+    extra = getattr(messages[-1], "additional_kwargs", {}) or {}
+    return getattr(messages[-1], "type", None) == "human" and not extra.get("ui_hidden")
 
 
 def _format_conversation(messages: list[BaseMessage], limit: int = 12) -> str:
+    """Only expose the newest top-level request; prior context is memory-gated."""
     lines: list[str] = []
-    for msg in messages[-limit:]:
+    for msg in reversed(messages):
         extra = getattr(msg, "additional_kwargs", {}) or {}
         if isinstance(extra, dict) and extra.get("ui_hidden"):
             continue
         role = getattr(msg, "type", "unknown")
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
         lines.append(f"{role}: {content}")
+        break
     return "\n".join(lines)
 
 
@@ -383,8 +388,6 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
     injected_note = note_text_from_resume(paused_resume).strip()
 
     messages = list(state["messages"])
-    if injected_note:
-        messages = messages + [HumanMessage(content=injected_note)]
 
     turn_start = _is_turn_start(messages)
     user_query = _latest_human_content(messages)
@@ -399,6 +402,33 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
 
     configurable = (config or {}).get("configurable") or {}
     uid = configurable.get("owner_id")
+
+    # The newest top-level request stays direct. Older top-level human inputs
+    # are durable/selectable instead of being blindly replayed in conversation.
+    original_execution_memory = execution_memory
+    for index, message in enumerate(messages[:-1], start=1):
+        if getattr(message, "type", None) != "human":
+            continue
+        extra = getattr(message, "additional_kwargs", {}) or {}
+        if extra.get("ui_hidden"):
+            continue  # clarification/pause inputs are recorded by their nodes
+        key = f"human_message_{index}"
+        if key in execution_memory:
+            continue
+        value = message.content if isinstance(message.content, str) else str(message.content)
+        execution_memory, context_memory, _ = record_execution(
+            execution_memory, context_memory, key=key, value=value,
+            description="Prior top-level user request", entry_type="human_input",
+            name="user", task="Conversation context",
+        )
+
+    if injected_note:
+        key = f"human_pause_{len(execution_memory) + 1}"
+        execution_memory, context_memory, _ = record_execution(
+            execution_memory, context_memory, key=key, value=injected_note,
+            description="User instruction supplied while agent was paused",
+            entry_type="human_input", name="user", task="Pause instruction",
+        )
 
     # Child IDs are runtime-generated, so the deterministic next action is to
     # collect pending children before asking the planner to decide anything else.
@@ -423,6 +453,8 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
                     },
                 )
             ] + update["messages"]
+        if execution_memory is not original_execution_memory:
+            update.update(execution_memory=execution_memory, context_memory=context_memory)
         return update
 
     learned = _safe_learned_experiences(user_query, execution_history, uid=uid) if uid else "(none)"
@@ -452,6 +484,9 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
         + ". To collect one, use <action>collect_child</action> and <parameters><child_agent_id>ID</child_agent_id></parameters>."
         if pending_children else ""
     )
+    # Fast/direct answering is safe only before execution memory exists. Every
+    # LLM call after an external input receives the complete index + FIFO view.
+    use_fast_prompt = use_fast_prompt and not execution_memory
     if use_fast_prompt:
         system_prompt, prompt = fast_agent_prompt_loader(
             user_query=user_query,
@@ -667,6 +702,9 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
                 },
             )
         ] + list(update.get("messages", []))
+
+    if execution_memory is not original_execution_memory and "execution_memory" not in update:
+        update.update(execution_memory=execution_memory, context_memory=context_memory)
 
     if traced:
         if update.get("next_step", {}).get("action") == "finish":

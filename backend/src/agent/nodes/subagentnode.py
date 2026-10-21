@@ -13,7 +13,7 @@ may call the same sub-agent again when more work is needed.
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from src.agent.control import NOT_PAUSED, maybe_pause, note_text_from_resume
-from src.agent.memory import count_content_tokens
+from src.agent.memory import count_content_tokens, record_execution, record_human_input
 from src.agent.policy_schema import armory_resource_allowed
 from src.agent.state import PlanExecuteState
 from src.agent.subagent_stream import emit_subagent_event
@@ -41,6 +41,11 @@ def subagent_node(state: PlanExecuteState, config: RunnableConfig | None = None)
     if paused_resume is not NOT_PAUSED:
         note = note_text_from_resume(paused_resume).strip()
         if note:
+            history, memory, context = record_human_input(
+                state.get("execution_history"), state.get("execution_memory"), state.get("context_memory"),
+                value=note, description="User instruction supplied while subagent execution was paused",
+                task=(state.get("next_step") or {}).get("task") or "",
+            )
             return {
                 "messages": [
                     HumanMessage(
@@ -50,7 +55,10 @@ def subagent_node(state: PlanExecuteState, config: RunnableConfig | None = None)
                             "ui_step": {"type": "reasoning", "content": f"User response: {note}"},
                         },
                     )
-                ]
+                ],
+                "execution_history": history,
+                "execution_memory": memory,
+                "context_memory": context,
             }
         return {}
 
@@ -97,8 +105,9 @@ def subagent_node(state: PlanExecuteState, config: RunnableConfig | None = None)
         )
         success = False
     elif ((configurable.get("enabled_subagents") is not None and agent_name not in configurable["enabled_subagents"])
-          or not armory_resource_allowed(((configurable.get("policy") or {}).get("armory") or {}),
-                                         group="subagents", name=agent_name)):
+          or ("policy" in configurable and not armory_resource_allowed(
+              ((configurable.get("policy") or {}).get("armory") or {}),
+              group="subagents", name=agent_name))):
         result = f"Sub-agent '{agent_name}' is disabled for this session."
         success = False
     else:
@@ -123,10 +132,22 @@ def subagent_node(state: PlanExecuteState, config: RunnableConfig | None = None)
         "structured": structured,
         "status": "completed" if success else "failed",
     }
+    step_key = f"subagent_{len(execution_history) + 1}"
+    execution_memory, context_memory, stored_entry = record_execution(
+        execution_memory,
+        context_memory,
+        key=step_key,
+        value=result,
+        description=task or f"Result of subagent {agent_name or 'unknown'}",
+        entry_type="subagent",
+        name=agent_name,
+        task=task,
+        success=success,
+        metadata={"agent_name": agent_name, "structured": structured,
+                  "status": "completed" if success else "failed"},
+    )
+    history_entry.update(stored_entry)
     execution_history.append(history_entry)
-    step_key = f"subagent_{len(execution_history)}"
-    history_entry["key"] = step_key
-    execution_memory[step_key] = history_entry
 
     tokens = count_content_tokens(result)
 

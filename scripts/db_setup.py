@@ -15,8 +15,10 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+_BACKEND_ROOT = _ROOT / "backend"
+for _p in (_BACKEND_ROOT, _ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 import psycopg
 
@@ -94,14 +96,34 @@ SCHEMA_STATEMENTS: list[str] = [
         parent_execution_id UUID REFERENCES agent_executions(execution_id),
         state TEXT NOT NULL CHECK (state IN ('running', 'interrupted', 'completed', 'failed', 'cancelled')),
         policy_version INTEGER NOT NULL,
+        latest_event_seq INTEGER NOT NULL DEFAULT 0,
+        current_state JSONB NOT NULL DEFAULT '{}',
         result TEXT,
         error TEXT,
         started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         ended_at TIMESTAMPTZ
     )
     """,
+    "ALTER TABLE agent_executions ADD COLUMN IF NOT EXISTS latest_event_seq INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE agent_executions ADD COLUMN IF NOT EXISTS current_state JSONB NOT NULL DEFAULT '{}'",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_active_execution ON agent_executions (agent_id) WHERE state IN ('running', 'interrupted')",
     "CREATE INDEX IF NOT EXISTS idx_agent_executions_parent ON agent_executions (parent_execution_id)",
+    """
+    CREATE TABLE IF NOT EXISTS agent_execution_events (
+        event_row_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        execution_id UUID NOT NULL REFERENCES agent_executions(execution_id) ON DELETE CASCADE,
+        sequence_number INTEGER NOT NULL,
+        event_id UUID NOT NULL,
+        agent_id UUID NOT NULL REFERENCES agent_cores(agent_id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        payload JSONB NOT NULL DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (execution_id, sequence_number),
+        UNIQUE (event_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_agent_execution_events_stream ON agent_execution_events (execution_id, sequence_number)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_execution_events_created ON agent_execution_events (created_at)",
     """
     CREATE TABLE IF NOT EXISTS agent_messages (
         message_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

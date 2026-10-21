@@ -118,6 +118,14 @@ export interface ChatMessage {
 export interface ChatDetailOut extends ChatOut {
   messages: ChatMessage[];
   execution_history?: Array<Record<string, unknown>>;
+  latest_execution?: {
+    execution_id: string;
+    status: string;
+    latest_sequence: number;
+    current_state?: Record<string, unknown>;
+    result?: string | null;
+    error?: string | null;
+  } | null;
   preloaded_context?: {
     user?: Record<string, unknown>;
     preferences?: Record<string, unknown>;
@@ -552,6 +560,7 @@ export const agentsAPI = {
       data: ReturnType<typeof normalizeChat> & {
         messages: Array<{ message_id: string; role: string; content: string; timestamp: number }>;
         execution_history: unknown[];
+        latest_execution?: ChatDetailOut['latest_execution'];
         preloaded_context?: unknown;
         rollback_checkpoint_id?: string | null;
       };
@@ -583,6 +592,7 @@ export const agentsAPI = {
               timestamp: Date.now(),
             })),
             execution_history: detail.execution_history || [],
+            latest_execution: detail.latest_execution || null,
             preloaded_context: detail.preloaded_context,
             rollback_checkpoint_id: detail.rollback_checkpoint_id,
           },

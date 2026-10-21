@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from api.core.config import get_settings
-from api.services.packet_queue import ChatPacketQueue
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ def get_agent_app():
 
 
 class AgentRuntime:
-    """Runs one LangGraph turn and fans events into a packet queue."""
+    """Runs one LangGraph turn and fans events into an execution event writer."""
 
     def __init__(self) -> None:
         self._cancel_flags: dict[str, threading.Event] = {}
@@ -88,7 +87,7 @@ class AgentRuntime:
         agent_id: str,
         owner_id: str,
         query: str | None = None,
-        queue: ChatPacketQueue,
+        event_writer,
         checkpoint_id: str | None = None,
         preloaded_context: dict[str, Any] | None = None,
         on_complete: Callable[..., None] | None = None,
@@ -110,16 +109,16 @@ class AgentRuntime:
         outcome_error = None
         final_answer = None
         if is_resume:
-            queue.enqueue("run.started", {"execution_id": execution_id, "resumed": True})
+            event_writer.enqueue("run.started", {"execution_id": execution_id, "resumed": True})
         else:
-            queue.enqueue(
+            event_writer.enqueue(
                 "run.started",
                 {"execution_id": execution_id, "query": query, "checkpoint_id": checkpoint_id},
             )
         # Immediate UI signal — LangGraph only emits node.started after the node
         # finishes, which left the client stuck on "Thinking…" during checkpoint
         # load / prompt prep / first LLM tokens.
-        queue.enqueue("node.started", {"node": "agent_node"})
+        event_writer.enqueue("node.started", {"node": "agent_node"})
 
         try:
             from src.agent.subagent_stream import (
@@ -150,7 +149,7 @@ class AgentRuntime:
                         payload["agent_id"] = source.get("agent_id")
                     if source.get("child_agent_id"):
                         payload["child_agent_id"] = source.get("child_agent_id")
-                queue.enqueue("llm.token", payload)
+                event_writer.enqueue("llm.token", payload)
 
             def on_subagent_event(agent_name: str, event: dict) -> None:
                 if cancel.is_set():
@@ -169,7 +168,7 @@ class AgentRuntime:
                         )
                     except Exception:
                         pass
-                queue.enqueue(
+                event_writer.enqueue(
                     "subagent.step",
                     {"agent_name": agent_name, "child_agent_id": event.get("child_agent_id"), "event": event},
                 )
@@ -177,7 +176,7 @@ class AgentRuntime:
             def on_cache_hit(payload: dict[str, Any]) -> None:
                 if cancel.is_set():
                     return
-                queue.enqueue("llm.cache_hit", payload)
+                event_writer.enqueue("llm.cache_hit", payload)
 
             def on_child_event(agent_name: str, event: dict) -> None:
                 if cancel.is_set():
@@ -185,7 +184,7 @@ class AgentRuntime:
                 kind = event.get("kind")
                 child_agent_id = event.get("child_agent_id")
                 if kind == "start":
-                    queue.enqueue(
+                    event_writer.enqueue(
                         "child.started",
                         {
                             "agent_name": agent_name,
@@ -196,7 +195,7 @@ class AgentRuntime:
                     return
 
                 if kind in {"complete", "error"}:
-                    queue.enqueue(
+                    event_writer.enqueue(
                         "child.finished",
                         {
                             "agent_name": agent_name,
@@ -220,7 +219,7 @@ class AgentRuntime:
                         )
                     except Exception:
                         pass
-                queue.enqueue(
+                event_writer.enqueue(
                     "child.step",
                     {"agent_name": agent_name, "child_agent_id": child_agent_id, "event": event},
                 )
@@ -257,7 +256,7 @@ class AgentRuntime:
                             answer=stopped_answer,
                             superseded=superseded,
                         )
-                        queue.enqueue(
+                        event_writer.enqueue(
                             "run.completed",
                             {
                                 "execution_id": execution_id,
@@ -305,7 +304,7 @@ class AgentRuntime:
                             kind=payload.get("kind"),
                             checkpoint_id=tip,
                         )
-                        queue.enqueue(
+                        event_writer.enqueue(
                             "run.interrupted",
                             {
                                 "execution_id": execution_id,
@@ -324,34 +323,34 @@ class AgentRuntime:
                         break
 
                     for node_name, updates in data.items():
-                        queue.enqueue(
+                        event_writer.enqueue(
                             "node.started",
                             {"node": node_name},
                         )
                         if not isinstance(updates, dict):
-                            queue.enqueue("node.finished", {"node": node_name})
+                            event_writer.enqueue("node.finished", {"node": node_name})
                             continue
 
                         next_step = updates.get("next_step") or {}
                         action = next_step.get("action")
 
                         if node_name == "agent_node" and updates.get("plan_created"):
-                            queue.enqueue("plan.created", updates["plan_created"])
+                            event_writer.enqueue("plan.created", updates["plan_created"])
                         if node_name == "plan_dispatcher" and updates.get("plan_event", {}).get("kind") == "phase.started":
-                            queue.enqueue("plan.phase.started", updates["plan_event"])
+                            event_writer.enqueue("plan.phase.started", updates["plan_event"])
                             for planned in updates["plan_event"]["steps"]:
-                                queue.enqueue("plan.step.started", {"sequence": updates["plan_event"]["sequence"], **planned})
+                                event_writer.enqueue("plan.step.started", {"sequence": updates["plan_event"]["sequence"], **planned})
                         if node_name == "phase_collector":
                             for result in updates.get("step_events") or []:
-                                queue.enqueue("plan.step.finished", {**result, "result": _truncate(result.get("result"))})
+                                event_writer.enqueue("plan.step.finished", {**result, "result": _truncate(result.get("result"))})
                             if updates.get("plan_event", {}).get("kind") == "phase.finished":
-                                queue.enqueue("plan.phase.finished", updates["plan_event"])
+                                event_writer.enqueue("plan.phase.finished", updates["plan_event"])
 
                         # Emit *.started only from agent_node's next_step decision.
                         # Emitting on the executor node name would duplicate the event
                         # when tool_node / subagent_node finish (they don't return next_step).
                         if node_name == "agent_node" and action == "tool":
-                            queue.enqueue(
+                            event_writer.enqueue(
                                 "tool.started",
                                 {
                                     "tool_name": next_step.get("tool_name"),
@@ -360,7 +359,7 @@ class AgentRuntime:
                                 },
                             )
                         if node_name == "agent_node" and action == "subagent":
-                            queue.enqueue(
+                            event_writer.enqueue(
                                 "subagent.started",
                                 {
                                     "agent_name": next_step.get("agent_name"),
@@ -377,7 +376,7 @@ class AgentRuntime:
                                 if last is None:
                                     pass
                                 elif last.get("type") == "tool":
-                                    queue.enqueue(
+                                    event_writer.enqueue(
                                         "tool.finished",
                                         {
                                             "tool_name": last.get("tool_name"),
@@ -392,7 +391,7 @@ class AgentRuntime:
                                     )
                                 elif last.get("type") == "subagent":
                                     if node_name != "collect_child" or last.get("status") != "running":
-                                        queue.enqueue(
+                                        event_writer.enqueue(
                                             "subagent.started" if last.get("status") == "running" else "subagent.finished",
                                             {"child_agent_id": last.get("child_agent_id"),
                                              "agent_name": last.get("agent_name"), "task": last.get("task"),
@@ -403,7 +402,7 @@ class AgentRuntime:
                                     if node_name != "child_agent_node" and (
                                         node_name != "collect_child" or last.get("status") != "running"
                                     ):
-                                        queue.enqueue(
+                                        event_writer.enqueue(
                                             "child.started" if last.get("status") == "running" else "child.finished",
                                             {"child_agent_id": last.get("child_agent_id"),
                                              "agent_name": last.get("agent_name") or "child_agent",
@@ -415,9 +414,9 @@ class AgentRuntime:
                         if action == "finish":
                             final_answer = next_step.get("answer")
                             log_event("run.answer", answer=final_answer)
-                            queue.enqueue("llm.done", {"channel": "output"})
+                            event_writer.enqueue("llm.done", {"channel": "output"})
 
-                        queue.enqueue(
+                        event_writer.enqueue(
                             "node.finished",
                             {
                                 "node": node_name,
@@ -446,11 +445,11 @@ class AgentRuntime:
 
                         child_runner.join(execution_id)
                     if outcome == "completed":
-                        _emit_turn_complete(queue, agent_id=agent_id, execution_id=execution_id,
+                        _emit_turn_complete(event_writer, agent_id=agent_id, execution_id=execution_id,
                                             final_answer=final_answer)
                     elif outcome == "cancelled":
-                        queue.enqueue("run.completed", {"execution_id": execution_id, "stopped": True,
-                                                        "answer": None, "superseded": self._pop_supersede(agent_id)})
+                        event_writer.enqueue("run.completed", {"execution_id": execution_id, "stopped": True,
+                                                               "answer": None, "superseded": self._pop_supersede(agent_id)})
             finally:
                 reset_token_callback(token)
                 reset_cache_hit_callback(cache_hit_token)
@@ -469,7 +468,7 @@ class AgentRuntime:
                 log_error(execution_id=execution_id, message=str(exc))
             except Exception:
                 pass
-            queue.enqueue(
+            event_writer.enqueue(
                 "run.error",
                 {"execution_id": execution_id, "message": str(exc)},
             )
@@ -482,7 +481,7 @@ class AgentRuntime:
                     child_runner.join(execution_id, cancel=True)
             except Exception as exc:
                 outcome, outcome_error = "failed", type(exc).__name__
-                queue.enqueue("run.error", {"execution_id": execution_id, "message": "Child collection failed"})
+                event_writer.enqueue("run.error", {"execution_id": execution_id, "message": "Child collection failed"})
             if (runtime or {}).get("agent_id") and outcome in {"completed", "failed"}:
                 trace_emit("run.lifecycle.end" if outcome == "completed" else "run.lifecycle.error",
                            status="ok" if outcome == "completed" else "error",
@@ -501,7 +500,7 @@ def _truncate(value: Any, limit: int = 2000) -> Any:
 
 
 def _emit_turn_complete(
-    queue: ChatPacketQueue,
+    event_writer,
     *,
     agent_id: str,
     execution_id: str,
@@ -516,8 +515,8 @@ def _emit_turn_complete(
         tip = cps[0]["checkpoint_id"] if cps else None
     except Exception:
         tip = None
-    queue.enqueue("checkpoint.created", {"checkpoint_id": tip})
-    queue.enqueue(
+    event_writer.enqueue("checkpoint.created", {"checkpoint_id": tip})
+    event_writer.enqueue(
         "run.completed",
         {
             "execution_id": execution_id,

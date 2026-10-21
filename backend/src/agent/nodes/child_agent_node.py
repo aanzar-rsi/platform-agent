@@ -5,7 +5,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage
 
 from src.agent.agent_core import AgentCore, Policy, child_runner
-from src.agent.memory import update_context_memory
+from src.agent.memory import record_execution
 
 
 def _requested_policy(raw: dict | None) -> Policy | None:
@@ -31,27 +31,18 @@ def child_agent_node(state: dict, config=None) -> dict:
     parent_id = values.get("agent_id")
     parent_execution_id = values.get("execution_id")
     if not parent_id or not parent_execution_id:
-        return {
-            "messages": [
-                AIMessage(content="Child spawning requires authenticated AgentCore runtime.",
-                          additional_kwargs={"ui_hidden": True})
-            ]
-        }
+        return _record_failure(state, "Child spawning requires authenticated AgentCore runtime.")
 
     repository = child_runner.repository
     parent_record = repository.get(parent_id)
     if (not parent_record or not values.get("owner_id") or
         str(_root_owner(repository, parent_record)) != str(values["owner_id"]) or
         parent_record["state"] != "open"):
-        return {
-            "messages": [
-                AIMessage(content="Parent agent not found or not owned.", additional_kwargs={"ui_hidden": True})
-            ]
-        }
+        return _record_failure(state, "Parent agent not found or not owned.")
 
     execution = repository.active_execution(parent_id)
     if not execution or str(execution["execution_id"]) != str(parent_execution_id) or execution["state"] != "running":
-        return {"messages": [AIMessage(content="Parent agent is not running.", additional_kwargs={"ui_hidden": True})]}
+        return _record_failure(state, "Parent agent is not running.")
 
     parent = AgentCore(parent_record, repository, active_execution_id=parent_execution_id)
     uid = values.get("owner_id")
@@ -108,19 +99,24 @@ def child_agent_node(state: dict, config=None) -> dict:
         if errors:
             summary += "; failed: " + "; ".join(errors)
 
+    if not spawned:
+        spawned = [{
+            "type": "child_agent", "agent_name": "child_agent",
+            "task": (state.get("next_step") or {}).get("task") or "Spawn child agents",
+            "status": "failed", "success": False,
+        }]
     for entry in spawned:
+        step_key = f"child_agent_{len(execution_history) + 1}"
+        value = {"summary": summary, "child_agent_id": entry.get("child_agent_id"),
+                 "status": entry["status"]}
+        execution_memory, context_memory, stored = record_execution(
+            execution_memory, context_memory, key=step_key, value=value,
+            description=entry.get("task") or "Child-agent spawn result",
+            entry_type="child_agent", name="child_agent", task=entry.get("task") or "",
+            success=entry["success"], metadata={k: v for k, v in entry.items() if k not in {"type", "result"}},
+        )
+        entry.update(stored)
         execution_history.append(entry)
-        step_key = f"child_agent_{len(execution_history)}"
-        entry["key"] = step_key
-        execution_memory[step_key] = entry
-
-    context_memory = update_context_memory(
-        context_memory,
-        key=f"child_spawn_{len(execution_history)}",
-        content=summary,
-        from_token=0,
-        to_token=None,
-    )
 
     return {
         "messages": [
@@ -132,4 +128,23 @@ def child_agent_node(state: dict, config=None) -> dict:
         "execution_history": execution_history,
         "execution_memory": execution_memory,
         "context_memory": context_memory,
+    }
+
+
+def _record_failure(state: dict, message: str) -> dict:
+    history = list(state.get("execution_history") or [])
+    key = f"child_agent_{len(history) + 1}"
+    task = (state.get("next_step") or {}).get("task") or "Spawn child agents"
+    memory, context, entry = record_execution(
+        state.get("execution_memory"), state.get("context_memory"), key=key,
+        value={"success": False, "error": message}, description=task,
+        entry_type="child_agent", name="child_agent", task=task, success=False,
+        metadata={"status": "failed"},
+    )
+    history.append(entry)
+    return {
+        "messages": [AIMessage(content=message, additional_kwargs={"ui_hidden": True})],
+        "execution_history": history,
+        "execution_memory": memory,
+        "context_memory": context,
     }

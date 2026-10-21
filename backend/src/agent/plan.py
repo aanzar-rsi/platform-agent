@@ -254,6 +254,34 @@ def parse_plan(raw: str, *, max_plan_steps: int, tools: set[str], subagents: set
                 if isinstance(phase, dict):
                     phase["sequence"] = sequence
 
+        # Context branches each receive the same snapshot, so parallel loads
+        # would overwrite one another. Serialize them and replan with the data.
+        normalized_phases = []
+        serialized_context = False
+        for phase in decoded.get("phases", []):
+            steps = phase.get("steps") if isinstance(phase, dict) else None
+            if not isinstance(steps, list) or not steps:
+                normalized_phases.append(phase)
+                continue
+            context_steps = [
+                step for step in steps
+                if isinstance(step, dict) and step.get("action") == "context_select"
+            ]
+            if not context_steps:
+                normalized_phases.append(phase)
+                continue
+            if len(context_steps) != len(steps):
+                normalized_phases.append(phase)
+                continue
+            normalized_phases.extend({"sequence": 0, "steps": [step]} for step in context_steps)
+            serialized_context = True
+            break
+        if serialized_context:
+            for sequence, phase in enumerate(normalized_phases, 1):
+                if isinstance(phase, dict):
+                    phase["sequence"] = sequence
+            decoded["phases"] = normalized_phases
+
     plan = Plan.model_validate(decoded)
 
     # Normalize common planner aliasing before strict validation checks.

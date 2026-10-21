@@ -16,7 +16,7 @@ from src.agent.control import (
     thread_id_from_config,
 )
 from src.agent.policy_schema import armory_resource_allowed
-from src.agent.memory import count_content_tokens
+from src.agent.memory import count_content_tokens, record_execution, record_human_input
 from src.agent.state import PlanExecuteState
 from src.tools import INTERNAL_TOOLS
 from api.services.mcp_runtime import available_mcp_tools, call_mcp_tool
@@ -59,7 +59,8 @@ def tool_node(state: PlanExecuteState, config: RunnableConfig | None = None) -> 
     armory = (configurable.get("policy") or {}).get("armory") or {}
     mcp_tools = available_mcp_tools(configurable.get("owner_id"))
     tool_disabled = ((enabled_tools is not None and tool_name not in enabled_tools)
-                     or not armory_resource_allowed(armory, group="tools", name=tool_name))
+                     or ("policy" in configurable
+                         and not armory_resource_allowed(armory, group="tools", name=tool_name)))
     if tool_disabled:
         result = {"success": False, "error": f"Tool '{tool_name}' is disabled for this session."}
         if traced:
@@ -120,11 +121,17 @@ def tool_node(state: PlanExecuteState, config: RunnableConfig | None = None) -> 
         else:
             injected_note = note_text_from_resume(decision)
 
+        note = (injected_note or "").strip() if isinstance(injected_note, str) else ""
+        if note:
+            execution_history, execution_memory, context_memory = record_human_input(
+                execution_history, execution_memory, context_memory, value=note,
+                description="User response at tool approval or pause gate", task=task,
+            )
+
         if pause_requested and not needs_confirm:
             # A plain pause (no confirmation needed): skip this tool call
             # entirely and let agent_node re-plan, optionally with a new
             # instruction the user typed while paused.
-            note = (injected_note or "").strip() if isinstance(injected_note, str) else ""
             if note:
                 return {
                     "messages": [
@@ -135,7 +142,10 @@ def tool_node(state: PlanExecuteState, config: RunnableConfig | None = None) -> 
                                 "ui_step": {"type": "reasoning", "content": f"User response: {note}"},
                             },
                         )
-                    ]
+                    ],
+                    "execution_history": execution_history,
+                    "execution_memory": execution_memory,
+                    "context_memory": context_memory,
                 }
             return {}
 
@@ -246,8 +256,20 @@ def _record_tool_result(
         "result":    result,
         "success":   not (isinstance(result, dict) and result.get("success") is False),
     }
+    execution_memory, context_memory, stored_entry = record_execution(
+        execution_memory,
+        context_memory,
+        key=step_key,
+        value=result,
+        description=task or f"Result of tool {tool_name or 'unknown'}",
+        entry_type="tool",
+        name=tool_name,
+        task=task,
+        success=history_entry["success"],
+        metadata={"tool_name": tool_name, "tool_args": raw_args},
+    )
+    history_entry.update(stored_entry)
     execution_history.append(history_entry)
-    execution_memory[step_key] = history_entry
 
     tokens = count_content_tokens(result)
 

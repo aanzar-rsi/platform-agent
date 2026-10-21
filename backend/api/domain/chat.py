@@ -38,6 +38,7 @@ class ChatDetailOut(ChatOut):
     messages: list[dict[str, Any]] = Field(default_factory=list)
     execution_history: list[dict[str, Any]] = Field(default_factory=list)
     preloaded_context: dict[str, Any] = Field(default_factory=dict)
+    latest_execution: dict[str, Any] | None = None
 
 
 class RollbackRequest(BaseModel):

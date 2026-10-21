@@ -58,6 +58,43 @@ def test_parse_plan_accepts_ask_user_prompt_alias_and_normalizes_to_question():
     assert step["parameters"]["question"] == "Which system should I check?"
 
 
+def test_parse_plan_serializes_context_loads_and_replans_before_finish():
+    context_step = lambda id, key: {
+        "id": id,
+        "action": "context_select",
+        "name": "",
+        "task": f"load {key}",
+        "parameters": {"key": key},
+        "uses": [],
+        "child_calls": [],
+    }
+    raw = {
+        "phases": [
+            {
+                "sequence": 1,
+                "steps": [context_step("tokyo", "tokyo-key"), context_step("dubai", "dubai-key")],
+            },
+            {
+                "sequence": 2,
+                "steps": [{
+                    "id": "finish",
+                    "action": "finish",
+                    "name": "",
+                    "task": "compare",
+                    "parameters": {"answer": "Placeholder without loaded values"},
+                    "uses": [],
+                    "child_calls": [],
+                }],
+            },
+        ]
+    }
+
+    phases = parse_plan(json.dumps(raw), max_plan_steps=4, tools=set(), subagents=set())
+
+    assert [phase["sequence"] for phase in phases] == [1, 2]
+    assert [phase["steps"][0]["id"] for phase in phases] == ["tokyo", "dubai"]
+
+
 def test_parse_plan_reports_empty_or_invalid_json_cleanly():
     tools = {"first"}
     with pytest.raises(ValueError, match="steps_json is empty"):

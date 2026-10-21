@@ -12,6 +12,7 @@ export interface WsEnvelope {
   ts?: string;
   payload: Record<string, unknown>;
   epoch?: number;
+  execution_id?: string;
 }
 
 export type ServerEventType =
@@ -44,6 +45,10 @@ export type ServerEventType =
 
 export interface AgentWebSocketHandlers {
   onSessionReady?: (payload: {
+    execution_id?: string | null;
+    status?: string;
+    latest_sequence?: number;
+    current_state?: Record<string, unknown>;
     last_seq: number;
     run_active: boolean;
     backlog_count: number;
@@ -133,13 +138,15 @@ export class AgentWebSocketClient {
   private agentId: string;
   private handlers: AgentWebSocketHandlers;
   private lastSeq = 0;
+  private seqByExecution = new Map<string, number>();
   private epoch = 0;
   private intentionalClose = false;
   private reconnectAttempts = 0;
   private maxReconnect = 8;
-  private ackTimer: ReturnType<typeof setInterval> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private pendingAckSeq = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private executionId: string | null = null;
+  private requestedAfterSeq = 0;
 
   constructor(agentId: string, handlers: AgentWebSocketHandlers = {}) {
     this.agentId = agentId;
@@ -155,20 +162,29 @@ export class AgentWebSocketClient {
   }
 
   get currentSeq() {
+    return this.currentCursor();
+  }
+
+  private currentCursor() {
+    if (this.executionId) return this.seqByExecution.get(this.executionId) ?? 0;
     return this.lastSeq;
   }
 
-  connect(afterSeq?: number) {
+  connect(afterSeq?: number, executionId?: string | null) {
     this.intentionalClose = false;
+    this.stopReconnect();
     const token = getAccessToken();
     if (!token) {
       this.handlers.onError?.({ message: 'Missing access token' });
       return;
     }
 
-    const seq = afterSeq ?? this.lastSeq;
+    const seq = afterSeq ?? this.currentCursor();
+    this.requestedAfterSeq = Math.max(0, seq);
+    if (executionId !== undefined) this.executionId = executionId;
     const qs = new URLSearchParams({ token });
     if (seq > 0) qs.set('after_seq', String(seq));
+    if (executionId) qs.set('execution_id', executionId);
 
     const url = `${WS_HOST}/v1/ws/agents/${encodeURIComponent(this.agentId)}?${qs.toString()}`;
     if (this.ws) {
@@ -184,13 +200,14 @@ export class AgentWebSocketClient {
     this.ws = ws;
 
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       this.reconnectAttempts = 0;
       this.startHeartbeat();
-      this.startAckLoop();
       this.handlers.onOpen?.();
     };
 
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
       let msg: WsEnvelope;
       try {
         msg = JSON.parse(ev.data);
@@ -201,13 +218,17 @@ export class AgentWebSocketClient {
     };
 
     ws.onclose = (ev) => {
+      if (this.ws !== ws) return;
       this.stopTimers();
       this.handlers.onClose?.(ev);
       if (!this.intentionalClose && this.reconnectAttempts < this.maxReconnect) {
         this.reconnectAttempts += 1;
         this.handlers.onReconnect?.(this.reconnectAttempts);
         const delay = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 15000);
-        setTimeout(() => this.connect(this.lastSeq), delay);
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = null;
+          if (!this.intentionalClose) this.connect(this.currentCursor(), this.executionId);
+        }, delay);
       }
     };
 
@@ -266,10 +287,6 @@ export class AgentWebSocketClient {
     return this.send('ping', {});
   }
 
-  ack(seq: number) {
-    return this.send('ack', { seq });
-  }
-
   /** Compat alias used by older call sites */
   sendQuery(query: string, _promptId?: string, _tune?: unknown) {
     return this.startRun(query);
@@ -285,32 +302,55 @@ export class AgentWebSocketClient {
       if (msg.epoch > this.epoch) this.epoch = msg.epoch;
     }
 
-    if (typeof msg.seq === 'number' && msg.seq > 0) {
-      if (msg.seq <= this.lastSeq && msg.type !== 'session.ready') {
-        // duplicate — still allow through for catch-up only if we haven't seen it;
-        // simple dedup:
-        if (msg.seq < this.lastSeq) return;
-      }
-      this.lastSeq = Math.max(this.lastSeq, msg.seq);
-      this.pendingAckSeq = this.lastSeq;
-    }
-
     const payload = (msg.payload || {}) as Record<string, unknown>;
 
     switch (msg.type as ServerEventType | string) {
       case 'session.ready': {
         const ready = {
+          execution_id: (payload.execution_id as string | undefined) ?? null,
+          status: (payload.status as string | undefined) ?? undefined,
+          latest_sequence: Number(payload.latest_sequence ?? payload.last_seq ?? 0),
+          current_state: (payload.current_state as Record<string, unknown> | undefined) ?? {},
           last_seq: Number(payload.last_seq ?? 0),
           run_active: Boolean(payload.run_active),
           backlog_count: Number(payload.backlog_count ?? 0),
           epoch: Number(payload.epoch ?? 0),
         };
         this.epoch = ready.epoch;
-        if (ready.last_seq > this.lastSeq) this.lastSeq = ready.last_seq;
+        this.executionId = ready.execution_id;
+        if (ready.execution_id) {
+          const prev = this.seqByExecution.get(ready.execution_id) ?? 0;
+          const baseline = Math.max(prev, this.requestedAfterSeq);
+          this.seqByExecution.set(ready.execution_id, baseline);
+          this.lastSeq = baseline;
+        } else {
+          this.lastSeq = Math.max(this.lastSeq, this.requestedAfterSeq);
+        }
         this.handlers.onSessionReady?.(ready);
         break;
       }
+      default: {
+        if (typeof msg.seq === 'number' && msg.seq > 0) {
+          const eventExecutionId = msg.execution_id ?? this.executionId;
+          if (eventExecutionId) {
+            const last = this.seqByExecution.get(eventExecutionId) ?? 0;
+            if (msg.seq <= last) return;
+            this.seqByExecution.set(eventExecutionId, msg.seq);
+            if (eventExecutionId === this.executionId) this.lastSeq = msg.seq;
+          } else {
+            if (msg.seq <= this.lastSeq) return;
+            this.lastSeq = msg.seq;
+          }
+        }
+      }
+    }
+
+    switch (msg.type as ServerEventType | string) {
       case 'run.started':
+        if (typeof payload.execution_id === 'string' && payload.execution_id) {
+          this.executionId = payload.execution_id;
+          this.lastSeq = this.seqByExecution.get(payload.execution_id) ?? 0;
+        }
         this.handlers.onRunStarted?.(payload as any);
         break;
       case 'node.started':
@@ -397,13 +437,6 @@ export class AgentWebSocketClient {
     this.pingTimer = setInterval(() => this.ping(), 25000);
   }
 
-  private startAckLoop() {
-    this.stopAckLoop();
-    this.ackTimer = setInterval(() => {
-      if (this.pendingAckSeq > 0) this.ack(this.pendingAckSeq);
-    }, 2000);
-  }
-
   private stopHeartbeat() {
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
@@ -411,16 +444,16 @@ export class AgentWebSocketClient {
     }
   }
 
-  private stopAckLoop() {
-    if (this.ackTimer) {
-      clearInterval(this.ackTimer);
-      this.ackTimer = null;
+  private stopReconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
   }
 
   private stopTimers() {
     this.stopHeartbeat();
-    this.stopAckLoop();
+    this.stopReconnect();
   }
 }
 

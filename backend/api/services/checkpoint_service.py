@@ -38,9 +38,6 @@ class CheckpointService:
     def rollback(self, user: CurrentUser, agent_id: str, body: RollbackRequest) -> dict:
         self._owned(agent_id, user)
         self.set_rollback(agent_id, body.checkpoint_id, user=user)
-        from api.services.chat_runtime_manager import get_runtime_manager
-
-        get_runtime_manager().fence_queue(agent_id)
         self.repos.analytics.append("rollback", uid=user.uid,
                                     payload={"agent_id": agent_id, "checkpoint_id": body.checkpoint_id})
         return {"success": True, "agent_id": agent_id, "checkpoint_id": body.checkpoint_id,

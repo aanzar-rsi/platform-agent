@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from langgraph.graph import END
+from langchain_core.messages import HumanMessage
 
 from src.agent.edges.routing import (
     CHILD_AGENT_NODE,
@@ -32,7 +33,7 @@ from src.agent.memory import (
     slim_execution_history,
     update_context_memory,
 )
-from src.agent.nodes.agentnode import _parse_response, _run_stream
+from src.agent.nodes.agentnode import _format_conversation, _latest_human_content, _parse_response, _run_stream
 from src.agent.nodes.context_selector import context_selector_node
 from src.agent.nodes.subagentnode import subagent_node
 from src.agent.nodes.toolnode import tool_node
@@ -191,7 +192,8 @@ class TestUpdateContextMemory(unittest.TestCase):
         cm = update_context_memory(cm, key="b", content=_tokens_of_chars(40), budget=budget)
         cm = update_context_memory(cm, key="c", content=_tokens_of_chars(40), budget=budget)
         keys = [e["key"] for e in cm["entries"]]
-        self.assertNotIn("a", keys)
+        self.assertIn("a", keys)
+        self.assertEqual(cm["entries"][0]["from_token"], 20)
         self.assertIn("c", keys)
         self.assertLessEqual(cm["used_tokens"], budget)
 
@@ -273,6 +275,7 @@ class TestIndexAndSlimHistory(unittest.TestCase):
         self.assertTrue(by_key["tool_1"]["in_context"])
         self.assertFalse(by_key["tool_2"]["in_context"])
         self.assertEqual(by_key["tool_1"]["name"], "read_file")
+        self.assertEqual(by_key["tool_1"]["description"], "load")
         self.assertNotIn("result", by_key["tool_1"])
 
     def test_index_handles_non_dict_entries(self):
@@ -628,6 +631,14 @@ class TestPromptLoader(unittest.TestCase):
         )
         self.assertIn("session_intent", user)
 
+    def test_hidden_human_answer_is_not_direct_prompt_input(self):
+        messages = [
+            HumanMessage(content="original request"),
+            HumanMessage(content="SECRET_ANSWER", additional_kwargs={"ui_hidden": True}),
+        ]
+        self.assertEqual(_latest_human_content(messages), "original request")
+        self.assertNotIn("SECRET_ANSWER", _format_conversation(messages))
+
 
 class TestToonTokenSavings(unittest.TestCase):
     def test_structured_bundle_saves_at_least_40_percent_vs_json_pretty(self):
@@ -792,7 +803,7 @@ class TestToolAndSubagentIngest(unittest.TestCase):
         }
         out = tool_node(state)
         self.assertIn("tool_1", out["execution_memory"])
-        self.assertEqual(out["context_memory"]["entries"], [])
+        self.assertEqual(out["context_memory"]["entries"][0]["key"], "tool_1")
         msg = out["messages"][0].content
         self.assertIn("Tool 'no_such_tool' result:", msg)
         self.assertIn("Unknown tool", msg)
@@ -817,9 +828,9 @@ class TestToolAndSubagentIngest(unittest.TestCase):
             )
         # full payload retained in execution_memory
         self.assertEqual(out["execution_memory"]["tool_1"]["result"], huge)
-        # no automatic context loading; planner should use context_select by key
-        self.assertFalse(out["context_memory"]["truncated"])
-        self.assertEqual(out["context_memory"]["used_tokens"], 0)
+        self.assertTrue(out["context_memory"]["truncated"])
+        self.assertLessEqual(out["context_memory"]["used_tokens"], CONTEXT_MEMORY_BUDGET)
+        self.assertFalse(out["context_memory"]["entries"][0]["complete"])
 
     def test_subagent_unknown_auto_ingests(self):
         out = subagent_node(
@@ -832,8 +843,17 @@ class TestToolAndSubagentIngest(unittest.TestCase):
             }
         )
         self.assertIn("subagent_1", out["execution_memory"])
-        self.assertEqual(out["context_memory"]["entries"], [])
+        self.assertEqual(out["context_memory"]["entries"][0]["key"], "subagent_1")
         self.assertIn("Subagent 'ghost' result:", out["messages"][0].content)
+
+    def test_fifo_trims_only_needed_prefix(self):
+        cm = empty_context_memory(100)
+        cm = update_context_memory(cm, key="a", content=_tokens_of_chars(70), budget=100)
+        cm = update_context_memory(cm, key="b", content=_tokens_of_chars(50), budget=100)
+        self.assertEqual([entry["key"] for entry in cm["entries"]], ["a", "b"])
+        self.assertEqual(cm["entries"][0]["from_token"], 20)
+        self.assertFalse(cm["entries"][0]["complete"])
+        self.assertEqual(cm["used_tokens"], 100)
 
 
 class TestGraphWiring(unittest.TestCase):

@@ -45,3 +45,8 @@ frontend/graphify-out/
 Thumbs.db
 .idea/
 .vscode/
+
+logs/
+tests/
+requirements/
+graphify-out/

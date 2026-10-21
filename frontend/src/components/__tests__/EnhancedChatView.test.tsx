@@ -100,6 +100,7 @@ describe("EnhancedChatView", () => {
       success: true,
       data: {
         title: "Test Chat",
+        latest_execution: null,
         messages: [
           { role: "user", content: "Hello", message_id: "m1" },
           {
@@ -129,10 +130,37 @@ describe("EnhancedChatView", () => {
 
     await waitFor(() => {
       expect(getMock).toHaveBeenCalledWith("u1", "chat_1");
-      expect(connectMock).toHaveBeenCalled();
+      expect(connectMock).toHaveBeenCalledWith(0, null);
       expect(screen.getByText("Hello")).toBeInTheDocument();
       expect(screen.getByText("Hi there")).toBeInTheDocument();
       expect(screen.getByText("Test Chat")).toBeInTheDocument();
+    });
+  });
+
+  it("reloads active execution with full replay from sequence 0", async () => {
+    getMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        title: "Test Chat",
+        latest_execution: {
+          execution_id: "exec_1",
+          status: "running",
+          latest_sequence: 42,
+          current_state: {},
+        },
+        messages: [{ role: "user", content: "Hello", message_id: "m1" }],
+        rollback_checkpoint_id: null,
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <EnhancedChatView sessionId="chat_1" />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(connectMock).toHaveBeenCalledWith(0, "exec_1");
     });
   });
 

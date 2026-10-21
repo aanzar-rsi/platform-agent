@@ -15,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from api.app import create_app
 from api.services.chat_runtime_manager import get_runtime_manager
+from api.core.deps import get_repos
 
 PASS = 0
 FAIL = 0
@@ -394,9 +395,21 @@ def main() -> int:
         )
 
         mgr = get_runtime_manager()
-        rt = mgr.get_or_create(chat_a_id, uid)
-        rt.queue.enqueue("run.started", {"execution_id": "t1"})
-        rt.queue.enqueue("llm.token", {"text": "hi", "channel": "output"})
+        repos = get_repos()
+        ex = repos.agents.start_execution(chat_a_id)
+        execution_id = str(ex["execution_id"])
+        repos.execution_events.append(
+            agent_id=chat_a_id,
+            execution_id=execution_id,
+            event_type="run.started",
+            payload={"execution_id": execution_id},
+        )
+        repos.execution_events.append(
+            agent_id=chat_a_id,
+            execution_id=execution_id,
+            event_type="llm.token",
+            payload={"text": "hi", "channel": "output"},
+        )
 
         with c.websocket_connect(f"/v1/ws/agents/{chat_a_id}?token={token}") as ws:
             ready = ws.receive_json()
@@ -414,13 +427,6 @@ def main() -> int:
             ws.send_json({"type": "ping", "payload": {}})
             pong = ws.receive_json()
             check("ws ping->pong", pong.get("type") == "pong", str(pong))
-
-            ws.send_json({"type": "ack", "payload": {"seq": msgs[-1]["seq"]}})
-            check("ws ack accepted", True)
-
-            ws.send_json({"type": "ack", "payload": {"seq": "nope"}})
-            bad_ack = ws.receive_json()
-            check("ws bad ack -> error", bad_ack.get("type") == "error", str(bad_ack))
 
             ws.send_json({"type": "run.start", "payload": {"query": "   "}})
             err = ws.receive_json()
@@ -461,6 +467,7 @@ def main() -> int:
             )
 
             # double run: force active flag
+            rt = mgr.get_or_create(chat_a_id, uid)
             rt.run_active = True
             ws.send_json(
                 {"type": "run.start", "payload": {"query": "should fail busy"}}
@@ -475,7 +482,7 @@ def main() -> int:
             rt.run_active = False
 
         with c.websocket_connect(
-            f"/v1/ws/agents/{chat_a_id}?token={token}&after_seq=0"
+            f"/v1/ws/agents/{chat_a_id}?token={token}&execution_id={execution_id}&after_seq=0"
         ) as ws:
             ready = ws.receive_json()
             check("ws reconnect session.ready", ready.get("type") == "session.ready")

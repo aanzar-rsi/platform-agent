@@ -67,10 +67,12 @@ Plan rules:
 - A plan containing spawn_children MUST end immediately after that spawn_children phase. Do not plan collect_child or finish yet; runtime-generated child IDs will be available when the agent replans.
 - If execution_history already contains child_agent entries, NEVER spawn replacements. Collect pending child IDs, or use context_select for existing execution_memory keys.
 - If execution_history/execution_memory_index already contain completed data for this turn, prefer context_select + synthesis over repeating tool/subagent calls.
+- execution_memory_index lists every stored key and description. Values are available only through context_memory; use context_select when a required range is absent or incomplete.
 - Do not add planning/decomposition tool steps. Planning is your job; only call exact tool names listed in Armory.
 - tool_call name must be an available tool; agent_call name must be an available subagent.
 - uses may reference IDs from earlier phases only. If you need a result to fill an argument, plan a later round after reading it; do not guess values.
 - Parallel phases (more than one step) may contain only independent tool_call/agent_call steps. Put confirmation-requiring tools and mutating actions alone.
+- Every context_select must be alone in its own sequential phase. After the last context_select, stop the plan so the agent can replan with the loaded values.
 - ask_user must be alone in its phase. finish must be alone in the final phase, with parameters.answer containing a response you can write now, without future tool results.
 - For tasks requiring tool results not yet known, stop after gathering data. The agent will replan with the results.
 - Keep steps minimal, use only armory resources, and give no imagined results.
@@ -79,8 +81,8 @@ Valid examples (JSON only, no prose):
 Example A - one tool then finish:
 {"phases":[{"sequence":1,"steps":[{"id":"s1","action":"tool_call","name":"system_info","task":"Get system details","parameters":{},"uses":[],"child_calls":[]}]},{"sequence":2,"steps":[{"id":"s2","action":"finish","name":"","task":"Return answer","parameters":{"answer":"System info collected."},"uses":[],"child_calls":[]}]}]}
 
-Example B - load memory by key before finishing:
-{"phases":[{"sequence":1,"steps":[{"id":"s1","action":"context_select","name":"","task":"Load weather result","parameters":{"key":"plan_step1_tokyo"},"uses":[],"child_calls":[]}]},{"sequence":2,"steps":[{"id":"s2","action":"finish","name":"","task":"Summarize loaded context","parameters":{"answer":"Loaded data and prepared summary."},"uses":[],"child_calls":[]}]}]}
+Example B - load memory keys sequentially, then stop so loaded values can be synthesized:
+{"phases":[{"sequence":1,"steps":[{"id":"s1","action":"context_select","name":"","task":"Load Tokyo weather","parameters":{"key":"plan_step1_tokyo"},"uses":[],"child_calls":[]}]},{"sequence":2,"steps":[{"id":"s2","action":"context_select","name":"","task":"Load Dubai weather","parameters":{"key":"plan_step2_dubai"},"uses":[],"child_calls":[]}]}]}
 
 Example C - spawn children (must stop after this phase):
 {"phases":[{"sequence":1,"steps":[{"id":"s1","action":"spawn_children","name":"spawn_weather","task":"Fetch weather in parallel","parameters":{},"uses":[],"child_calls":[{"task":"Fetch current weather for Tokyo"},{"task":"Fetch current weather for Hyderabad"}]}]}]}

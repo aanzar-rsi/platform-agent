@@ -12,6 +12,7 @@ from api.db.repositories import (
     AgentRepository,
     AnalyticsRepository,
     AuthSessionRepository,
+    ExecutionEventRepository,
     McpRepository,
     MemoryRepository,
     MemoryExtractionRepository,
@@ -34,6 +35,7 @@ class Repositories:
     preferences: PreferencesRepository = field(default_factory=PreferencesRepository)
     mcp: McpRepository = field(default_factory=McpRepository)
     analytics: AnalyticsRepository = field(default_factory=AnalyticsRepository)
+    execution_events: ExecutionEventRepository = field(default_factory=ExecutionEventRepository)
 
 
 _repos: Repositories | None = None

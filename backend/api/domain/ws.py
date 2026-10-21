@@ -20,9 +20,5 @@ class ClientRunStart(BaseModel):
     checkpoint_id: str | None = None
 
 
-class ClientAck(BaseModel):
-    seq: int
-
-
 class ClientRollback(BaseModel):
     checkpoint_id: str

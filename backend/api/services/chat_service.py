@@ -106,12 +106,24 @@ class ChatService:
         doc = self._owned(agent_id, user)
         messages = _load_messages(agent_id)
         history = _load_execution_history(agent_id) if doc.get("last_activity_at") else []
+        latest = self.repos.agents.active_execution(agent_id) or self.repos.agents.latest_execution(agent_id)
+        latest_execution = None
+        if latest:
+            latest_execution = {
+                "execution_id": str(latest.get("execution_id")),
+                "status": str(latest.get("state") or "unknown"),
+                "latest_sequence": int(latest.get("latest_event_seq") or 0),
+                "current_state": latest.get("current_state") or {},
+                "result": latest.get("result"),
+                "error": latest.get("error"),
+            }
         if is_placeholder_title(doc.get("title")):
             first = _first_human_content(messages)
             if first:
                 doc = self.repos.sessions.update(agent_id, title=title_from_first_message(first)) or doc
         return ChatDetailOut(**ChatOut.model_validate(doc).model_dump(), messages=messages,
-                             execution_history=history, preloaded_context=doc.get("preloaded_context") or {})
+                             execution_history=history, preloaded_context=doc.get("preloaded_context") or {},
+                             latest_execution=latest_execution)
 
     def update(self, user: CurrentUser, agent_id: str, body: ChatUpdateRequest) -> ChatOut:
         self._owned(agent_id, user)

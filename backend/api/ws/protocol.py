@@ -9,7 +9,6 @@ CLIENT_RUN_ROLLBACK = "run.rollback"
 CLIENT_RUN_PAUSE = "run.pause"
 CLIENT_RUN_RESUME = "run.resume"
 CLIENT_PING = "ping"
-CLIENT_ACK = "ack"
 
 # Server → client
 SESSION_READY = "session.ready"

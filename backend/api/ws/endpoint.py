@@ -35,6 +35,7 @@ async def _reject(websocket: WebSocket, code: int, reason: str) -> None:
 async def agent_ws(websocket: WebSocket, agent_id: str) -> None:
     token = websocket.query_params.get("token")
     after_seq_raw = websocket.query_params.get("after_seq", "0")
+    execution_id = websocket.query_params.get("execution_id")
     try:
         after_seq = int(after_seq_raw)
     except ValueError:
@@ -70,7 +71,7 @@ async def agent_ws(websocket: WebSocket, agent_id: str) -> None:
     mgr = get_runtime_manager()
     detach_error = None
     try:
-        await mgr.attach(agent_id, user.uid, websocket, after_seq=after_seq)
+        await mgr.attach(agent_id, user.uid, websocket, execution_id=execution_id, after_seq=after_seq)
     except Exception as exc:
         logger.exception("WS attach failed")
         try:
@@ -114,6 +115,19 @@ async def _handle_client_message(
     websocket: WebSocket,
     session_id: str | None = None,
 ) -> None:
+    async def _send_error(message: str) -> None:
+        await websocket.send_json(
+            {
+                "v": 1,
+                "type": proto.ERROR,
+                "id": "error",
+                "agent_id": agent_id,
+                "seq": None,
+                "ts": utc_now_iso(),
+                "payload": {"message": message},
+            }
+        )
+
     type_ = raw.get("type")
     payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
 
@@ -131,19 +145,10 @@ async def _handle_client_message(
         )
         return
 
-    if type_ == proto.CLIENT_ACK:
-        try:
-            seq = int(payload.get("seq"))
-        except (TypeError, ValueError):
-            mgr.enqueue_control(agent_id, proto.ERROR, {"message": "ack.seq must be an int"})
-            return
-        mgr.ack(agent_id, seq)
-        return
-
     if type_ == proto.CLIENT_RUN_START:
         query = (payload.get("query") or "").strip()
         if not query:
-            mgr.enqueue_control(agent_id, proto.ERROR, {"message": "query required"})
+            await _send_error("query required")
             return
         checkpoint_id = payload.get("checkpoint_id")
         result = mgr.start_run(
@@ -154,19 +159,19 @@ async def _handle_client_message(
             session_id=session_id,
         )
         if not result.get("ok"):
-            mgr.enqueue_control(agent_id, proto.ERROR, {"message": result.get("error")})
+            await _send_error(str(result.get("error") or "run_start_failed"))
         return
 
     if type_ == proto.CLIENT_RUN_STOP:
         result = mgr.stop_run(agent_id)
         if not result.get("ok"):
-            mgr.enqueue_control(agent_id, proto.ERROR, {"message": result.get("error")})
+            await _send_error(str(result.get("error") or "run_stop_failed"))
         return
 
     if type_ == proto.CLIENT_RUN_PAUSE:
         result = mgr.pause_run(agent_id)
         if not result.get("ok"):
-            mgr.enqueue_control(agent_id, proto.ERROR, {"message": result.get("error")})
+            await _send_error(str(result.get("error") or "run_pause_failed"))
         return
 
     if type_ == proto.CLIENT_RUN_RESUME:
@@ -175,22 +180,21 @@ async def _handle_client_message(
             session_id=session_id,
         )
         if not result.get("ok"):
-            mgr.enqueue_control(agent_id, proto.ERROR, {"message": result.get("error")})
+            await _send_error(str(result.get("error") or "run_resume_failed"))
         return
 
     if type_ == proto.CLIENT_RUN_ROLLBACK:
         checkpoint_id = payload.get("checkpoint_id")
         if not checkpoint_id:
-            mgr.enqueue_control(agent_id, proto.ERROR, {"message": "checkpoint_id required"})
+            await _send_error("checkpoint_id required")
             return
         from api.services.checkpoint_service import CheckpointService
 
         try:
             CheckpointService(repos).set_rollback(agent_id, checkpoint_id)
         except HTTPException as exc:
-            mgr.enqueue_control(agent_id, proto.ERROR, {"message": str(exc.detail)})
+            await _send_error(str(exc.detail))
             return
-        mgr.fence_queue(agent_id)
         mgr.enqueue_control(
             agent_id,
             proto.CHECKPOINT_CREATED,
@@ -198,4 +202,4 @@ async def _handle_client_message(
         )
         return
 
-    mgr.enqueue_control(agent_id, proto.ERROR, {"message": f"Unknown type: {type_}"})
+    await _send_error(f"Unknown type: {type_}")

@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import interrupt
 
 from src.agent.control import note_text_from_resume
+from src.agent.memory import record_human_input
 from src.agent.state import PlanExecuteState
 
 
@@ -38,6 +39,12 @@ def human_input_node(state: PlanExecuteState, config=None) -> dict:
     except Exception:
         pass
 
+    history, memory, context = record_human_input(
+        state.get("execution_history"), state.get("execution_memory"), state.get("context_memory"),
+        value=answer_text or "(no answer provided)",
+        description=next_step.get("question") or "User response to agent question",
+        task=next_step.get("task") or state.get("current_task") or "",
+    )
     return {
         "messages": [
             HumanMessage(
@@ -50,5 +57,8 @@ def human_input_node(state: PlanExecuteState, config=None) -> dict:
                     },
                 },
             )
-        ]
+        ],
+        "execution_history": history,
+        "execution_memory": memory,
+        "context_memory": context,
     }

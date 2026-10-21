@@ -3,7 +3,7 @@
 from langchain_core.messages import AIMessage
 
 from src.agent.agent_core import child_runner
-from src.agent.memory import update_context_memory
+from src.agent.memory import record_execution
 
 
 def collect_child_node(state: dict, config=None) -> dict:
@@ -34,16 +34,25 @@ def collect_child_node(state: dict, config=None) -> dict:
                                                    sender_type="agent", sender_id=child_id,
                                                    child_agent_id=child_id, visible_to_user=False)
 
-    memory_key = matching.get("key") if index is not None else None
+    memory_key = matching.get("key") if index is not None else f"child_collect_{len(history) + 1}"
+    description = matching.get("task") if index is not None else "Unknown child collection result"
+    memory, context, stored = record_execution(
+        state.get("execution_memory"), state.get("context_memory"),
+        key=memory_key, value=result, description=description or "Child-agent result",
+        entry_type="child_agent", name="child_agent", task=description or "",
+        success=success, metadata={"child_agent_id": child_id,
+                                   "status": "completed" if success else "failed"},
+    )
+    if index is not None:
+        matching.update(stored)
+        history[index] = matching
+        memory[memory_key] = matching
     return {
         "next_step": {"action": "collect_child", "child_agent_id": child_id},
         "execution_history": history,
-        "execution_memory": {**(state.get("execution_memory") or {}),
-                             **({matching["key"]: matching} if index is not None else {})},
-        "context_memory": update_context_memory(state.get("context_memory"), key=f"child_{child_id}",
-                                                content=f"Child {child_id} collected. Use context_select with key {memory_key or f'child_{child_id}'} to inspect details.",
-                                                from_token=0, to_token=None),
-        "messages": [AIMessage(content=f"Child {child_id} collected (memory key: {memory_key or f'child_{child_id}'}).",
+        "execution_memory": memory,
+        "context_memory": context,
+        "messages": [AIMessage(content=f"Child {child_id} collected (memory key: {memory_key}).",
                                additional_kwargs={"ui_hidden": True,
                                                    "ui_step": {"type": "child_agent", "child_agent": {
                                                        "id": child_id, "child_agent_id": child_id,

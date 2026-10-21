@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 from api.services.agent_runtime import AgentRuntime
-from api.services.packet_queue import ChatPacketQueue
+
+
+class _Writer:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def enqueue(self, type_: str, payload: dict | None = None) -> dict:
+        event = {"type": type_, "payload": payload or {}}
+        self.events.append(event)
+        return event
 
 
 def test_child_events_emit_started_step_finished(monkeypatch):
     from src.agent.subagent_stream import emit_child_event
 
     runtime = AgentRuntime()
-    queue = ChatPacketQueue("agent-parent")
+    writer = _Writer()
 
     monkeypatch.setattr("api.services.agent_runtime.get_agent_app", lambda: object())
     monkeypatch.setattr("src.utils.agent_logger.log_event", lambda *args, **kwargs: None)
@@ -51,8 +60,8 @@ def test_child_events_emit_started_step_finished(monkeypatch):
 
     monkeypatch.setattr("src.utils.postgres_checkpointer.run_turn", fake_run_turn)
 
-    runtime.run_turn(agent_id="agent-parent", owner_id="u1", query="go", queue=queue)
-    packets = queue.snapshot_undelivered(0)
+    runtime.run_turn(agent_id="agent-parent", owner_id="u1", query="go", event_writer=writer)
+    packets = writer.events
     child_packets = [p for p in packets if p["type"].startswith("child.")]
     assert [p["type"] for p in child_packets] == ["child.started", "child.step", "child.finished"]
     assert child_packets[0]["payload"]["child_agent_id"] == "child-1"

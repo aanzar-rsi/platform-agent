@@ -187,8 +187,6 @@ def rollback(agent_id: str, body: RollbackRequest,
              user: Annotated[CurrentUser, Depends(require_user)],
              repos: Annotated[Repositories, Depends(get_repos)]) -> dict:
     result = CheckpointService(repos).rollback(user, agent_id, body)
-    from api.services.chat_runtime_manager import get_runtime_manager
-    get_runtime_manager().fence_queue(agent_id)
     get_runtime_manager().enqueue_control(agent_id, "checkpoint.created",
                                           {"checkpoint_id": body.checkpoint_id, "rollback": True})
     return result

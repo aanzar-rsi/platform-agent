@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     data_root: Path = _CLIENT_ROOT / "data"
     client_root: Path = _CLIENT_ROOT
 
-    packet_queue_max_packets: int = 5000
-    packet_queue_ttl_seconds: int = 3600
+    execution_event_retention_days: int = 7
+    execution_event_cleanup_interval_seconds: int = 3600
     max_parallel_bedrock: int = 4
 
 

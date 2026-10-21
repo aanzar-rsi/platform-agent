@@ -64,6 +64,21 @@ async def lifespan(app):
 
     kb_task = asyncio.create_task(maintain_kb(), name="kb-index-reconciliation")
 
+    async def cleanup_execution_events():
+        while True:
+            await asyncio.sleep(max(60, settings.execution_event_cleanup_interval_seconds))
+            try:
+                deleted = await asyncio.to_thread(
+                    get_repos().execution_events.cleanup_completed_older_than,
+                    settings.execution_event_retention_days,
+                )
+                if deleted:
+                    logger.info("Execution event retention deleted=%s", deleted)
+            except Exception:
+                logger.exception("Execution event retention cleanup failed")
+
+    cleanup_task = asyncio.create_task(cleanup_execution_events(), name="execution-event-retention")
+
     try:
         get_agent_app()
         app.state.agent_ready = True
@@ -85,6 +100,11 @@ async def lifespan(app):
 
     logger.info("EVA API listening config port=%s data_root=%s", settings.port, settings.data_root)
     yield
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     kb_task.cancel()
     try:
         await kb_task

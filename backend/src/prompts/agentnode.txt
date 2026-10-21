@@ -75,8 +75,8 @@ Child agents: use <action>spawn_children</action> (not tool_call) with <child_ca
 @end
 
 Context memory rules:
-- Tool and subagent results auto-enter context_memory (FIFO, ~5000 token budget). Oldest entries are evicted when space is needed.
-- If context_memory.truncated is True, the newest entry was clipped to fit the budget — request a later token window via context_select if you need more of that piece.
+- Tool, subagent, child-agent, and supplemental human results auto-enter context_memory (FIFO, 5000-token budget). The oldest visible content slides out when space is needed.
+- Each context entry has its own complete/truncated flag and visible token range. Use those fields, not the global compatibility flag, to decide whether more is needed.
 - If you need a key that is not in_context, or a different token range of a large piece, call context_select with that key and from_token / to_token.
 - Do NOT assume you can see full execution_memory payloads; only what is in context_memory.
 - After a tool succeeds, use its result to continue or answer. Repeat a tool call when the task requires it.

@@ -897,6 +897,12 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
   const loadGenerationRef = useRef(0);
   const runFinalizedRef = useRef(false);
   const activeExecutionIdRef = useRef<string | null>(null);
+  const latestExecutionRef = useRef<{
+    execution_id?: string;
+    status?: string;
+    latest_sequence?: number;
+    current_state?: Record<string, unknown>;
+  } | null>(null);
   const smokeAbortRef = useRef<AbortController | null>(null);
   const smokeActiveRef = useRef(false);
   const chatTitleRef = useRef(chatTitle);
@@ -1078,6 +1084,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
         response.data.execution_history || []
       );
       const rollbackCheckpointId = response.data.rollback_checkpoint_id || null;
+      latestExecutionRef.current = response.data.latest_execution || null;
       setChatTitle((prev) => {
         if (prev !== title) {
           queueMicrotask(() => window.dispatchEvent(new CustomEvent("eva:chats-changed")));
@@ -1357,7 +1364,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
   }, []);
 
   const connectWebSocket = useCallback(
-    (chatId: string) => {
+    (chatId: string, opts?: { afterSeq?: number; executionId?: string | null }) => {
       disconnectWebSocket();
       ignoreStaleRunEventsRef.current = true;
       const client = createWebSocketClient(chatId, userId, {
@@ -1365,6 +1372,9 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
         onClose: () => setWsConnected(false),
         onSessionReady: (payload) => {
           setWsConnected(true);
+          if (payload.execution_id) {
+            activeExecutionIdRef.current = payload.execution_id;
+          }
           if (payload.run_active) {
             ignoreStaleRunEventsRef.current = false;
             setExecuting(true);
@@ -1604,7 +1614,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
       });
 
       wsClientRef.current = client;
-      client.connect();
+      client.connect(opts?.afterSeq, opts?.executionId);
     },
     [disconnectWebSocket, finalizeRun, resetLiveState, setExecuting, userId]
   );
@@ -1636,11 +1646,15 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
         setIsChatLoading(true);
       }
 
-      // WebSocket connects in parallel; never blocks chat history render
-      connectWebSocket(sessionId);
-
       try {
         await refetchChat(sessionId, generation);
+        const latestExecution = latestExecutionRef.current;
+        const running = latestExecution?.status === "running" || latestExecution?.status === "interrupted";
+        const execId = latestExecution?.execution_id || null;
+        connectWebSocket(sessionId, {
+          executionId: execId,
+          afterSeq: running ? 0 : latestExecution?.latest_sequence || 0,
+        });
       } catch (err: any) {
         if (!cancelled && loadGenerationRef.current === generation) {
           console.error(err);
@@ -1648,6 +1662,9 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
           if (!cached) setMessages([]);
         }
       } finally {
+        if (!cancelled && loadGenerationRef.current === generation && !wsClientRef.current) {
+          connectWebSocket(sessionId);
+        }
         if (!cancelled && loadGenerationRef.current === generation) {
           setIsChatLoading(false);
         }

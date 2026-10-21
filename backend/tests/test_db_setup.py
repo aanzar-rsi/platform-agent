@@ -25,6 +25,7 @@ EXPECTED_TABLES = [
     "auth_sessions",
     "agent_cores",
     "agent_executions",
+    "agent_execution_events",
     "agent_messages",
     "messages",
     "mcp_servers_catalog",

@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage
 from langgraph.types import Send
 
 from src.agent.nodes.agentnode import _map_plan_step_to_next_step
+from src.agent.memory import record_execution
 
 
 def plan_dispatcher_node(state: dict, config=None) -> dict:
@@ -101,6 +102,16 @@ def phase_collector_node(state: dict, config=None) -> dict:
                 history = [entry if row.get("key") == original_key else row for row in history]
             else:
                 history.append(entry)
+            value = entry.get("value", entry.get("result"))
+            memory, context, stored = record_execution(
+                memory, context, key=entry["key"], value=value,
+                description=entry.get("description") or entry.get("task") or f"Result of plan step {step['id']}",
+                entry_type=entry.get("type") or result["action"],
+                name=entry.get("name") or entry.get("tool_name") or entry.get("agent_name") or "",
+                task=entry.get("task") or step["task"], success=entry.get("success", True),
+                metadata={k: v for k, v in entry.items() if k not in {"key", "type", "name", "description", "task", "value", "result", "total_tokens", "success"}},
+            )
+            entry.update(stored)
             memory[entry["key"]] = entry
             if not entry.get("success", True):
                 failed = True

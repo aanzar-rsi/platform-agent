@@ -9,7 +9,7 @@ Always returns to agent_node with updated context_memory.
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from src.agent.control import NOT_PAUSED, maybe_pause, note_text_from_resume
-from src.agent.memory import update_context_memory
+from src.agent.memory import record_human_input, update_context_memory
 from src.agent.state import PlanExecuteState
 
 
@@ -27,6 +27,11 @@ def context_selector_node(state: PlanExecuteState, config: RunnableConfig | None
     if paused_resume is not NOT_PAUSED:
         note = note_text_from_resume(paused_resume).strip()
         if note:
+            history, memory, context = record_human_input(
+                state.get("execution_history"), state.get("execution_memory"), state.get("context_memory"),
+                value=note, description="User instruction supplied while context selection was paused",
+                task=(state.get("next_step") or {}).get("task") or "",
+            )
             return {
                 "messages": [
                     HumanMessage(
@@ -36,7 +41,10 @@ def context_selector_node(state: PlanExecuteState, config: RunnableConfig | None
                             "ui_step": {"type": "reasoning", "content": f"User response: {note}"},
                         },
                     )
-                ]
+                ],
+                "execution_history": history,
+                "execution_memory": memory,
+                "context_memory": context,
             }
         return {}
 
@@ -51,8 +59,8 @@ def context_selector_node(state: PlanExecuteState, config: RunnableConfig | None
 
     if entry is None:
         content = f"context_selector error: key '{key}' not found in execution_memory."
-    elif isinstance(entry, dict) and "result" in entry:
-        content = entry["result"]
+    elif isinstance(entry, dict) and ("value" in entry or "result" in entry):
+        content = entry.get("value", entry.get("result"))
     else:
         content = entry
 

@@ -106,9 +106,9 @@ def build_execution_memory_index(
     execution_memory: dict[str, Any],
     context_memory: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """keys + short meta: name, task, total_tokens, in_context."""
-    in_context_keys = {
-        e.get("key")
+    """Return every execution key and description without exposing values."""
+    context_entries = {
+        e.get("key"): e
         for e in (context_memory or {}).get("entries", [])
         if e.get("key")
     }
@@ -120,19 +120,31 @@ def build_execution_memory_index(
             task = ""
             entry_type = "unknown"
         else:
-            content = entry.get("result", entry)
+            content = entry.get("value", entry.get("result", entry))
             entry_type = entry.get("type", "unknown")
-            name = entry.get("tool_name") or entry.get("agent_name") or ""
+            name = entry.get("name") or entry.get("tool_name") or entry.get("agent_name") or ""
             task = entry.get("task") or ""
+
+        visible = context_entries.get(key) or {}
+        description = (
+            entry.get("description") if isinstance(entry, dict) else "Stored execution output"
+        ) or task or name or "Stored execution output"
 
         index.append(
             {
                 "key": key,
                 "type": entry_type,
                 "name": name,
-                "task": task,
-                "total_tokens": count_content_tokens(content),
-                "in_context": key in in_context_keys,
+                "description": description,
+                "total_tokens": (
+                    int(entry["total_tokens"])
+                    if isinstance(entry, dict) and entry.get("total_tokens") is not None
+                    else count_content_tokens(content)
+                ),
+                "in_context": key in context_entries,
+                "context_from": visible.get("from_token"),
+                "context_to": visible.get("to_token"),
+                "context_complete": visible.get("complete", False),
             }
         )
     return index
@@ -174,7 +186,7 @@ def update_context_memory(
 
     1. Slice content to [from_token, to_token); clip to budget if needed.
     2. Remove any existing entries for `key`.
-    3. Evict oldest entries until the new slice fits.
+    3. Slide/trim the oldest entries until the new slice fits.
     4. Append the new entry (structured when possible, else TOON text).
     """
     cm = dict(context_memory) if context_memory else empty_context_memory(budget)
@@ -193,8 +205,29 @@ def update_context_memory(
 
     used = sum(_entry_tokens(e) for e in entries)
     while entries and used + new_tokens > budget:
-        evicted = entries.pop(0)
-        used -= _entry_tokens(evicted)
+        excess = used + new_tokens - budget
+        oldest = entries[0]
+        oldest_tokens = _entry_tokens(oldest)
+        if oldest_tokens <= excess:
+            entries.pop(0)
+            used -= oldest_tokens
+            continue
+        trimmed, actual_from, actual_to, total, truncated = slice_by_tokens(
+            oldest.get("content"), from_token=excess,
+        )
+        # The content is already a window, so translate local offsets back to
+        # the original execution value's token coordinates.
+        original_from = int(oldest.get("from_token") or 0)
+        oldest.update(
+            content=trimmed,
+            tokens=_token_count_of_value(trimmed),
+            from_token=original_from + actual_from,
+            to_token=original_from + actual_to,
+            total_tokens=int(oldest.get("total_tokens") or total),
+            complete=False,
+            truncated=True,
+        )
+        used = sum(_entry_tokens(e) for e in entries)
 
     if new_tokens > budget:
         sliced, actual_from, actual_to, total_tokens, was_truncated = slice_by_tokens(
@@ -207,6 +240,7 @@ def update_context_memory(
         entries = []
         used = 0
 
+    complete = actual_from == 0 and actual_to >= total_tokens and not was_truncated
     entries.append(
         {
             "key": key,
@@ -215,11 +249,76 @@ def update_context_memory(
             "to_token": actual_to,
             "total_tokens": total_tokens,
             "content": sliced,
+            "complete": complete,
+            "truncated": not complete,
         }
     )
     used += new_tokens
 
     cm["entries"] = entries
     cm["used_tokens"] = used
+    # Compatibility field: whether this insertion was budget-clipped. Entry
+    # completeness is authoritative because older windows may also be partial.
     cm["truncated"] = was_truncated
     return cm
+
+
+def record_execution(
+    execution_memory: dict[str, Any] | None,
+    context_memory: dict[str, Any] | None,
+    *,
+    key: str,
+    value: Any,
+    description: str,
+    entry_type: str,
+    name: str = "",
+    task: str = "",
+    success: bool = True,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Store a complete execution value and expose only its FIFO context window."""
+    if not key or not description.strip():
+        raise ValueError("execution memory requires a key and description")
+    memory = dict(execution_memory or {})
+    entry = {
+        "key": key,
+        "type": entry_type,
+        "name": name,
+        "description": description.strip(),
+        "task": task,
+        "value": value,
+        # Keep result during checkpoint migration; prompt/index readers prefer value.
+        "result": value,
+        "total_tokens": count_content_tokens(value),
+        "success": bool(success),
+        **(metadata or {}),
+    }
+    memory[key] = entry
+    context = update_context_memory(context_memory, key=key, content=value)
+    return memory, context, entry
+
+
+def record_human_input(
+    execution_history: list[dict[str, Any]] | None,
+    execution_memory: dict[str, Any] | None,
+    context_memory: dict[str, Any] | None,
+    *,
+    value: str,
+    description: str,
+    task: str = "",
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """Record supplemental human input before it can reach another agent call."""
+    history = list(execution_history or [])
+    memory = dict(execution_memory or {})
+    sequence = len(history) + 1
+    key = f"human_input_{sequence}"
+    while key in memory:
+        sequence += 1
+        key = f"human_input_{sequence}"
+    memory, context, entry = record_execution(
+        memory, context_memory, key=key, value=value,
+        description=description, entry_type="human_input", name="human_input",
+        task=task, success=True,
+    )
+    history.append(entry)
+    return history, memory, context

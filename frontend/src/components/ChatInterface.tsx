@@ -104,6 +104,7 @@ export default function ChatInterface() {
                 : workspaceView === "memory" ? <Memory embedded />
                 : workspaceView === "playground" ? <Playground embedded />
                 : <EnhancedChatView
+                 key={activeSessionId || "new-chat"}
                  sessionId={activeSessionId}
                 tuneSettings={tuneSettings}
                 onTuneSettingsChange={setTuneSettings}
