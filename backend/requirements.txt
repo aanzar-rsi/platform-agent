@@ -41,6 +41,7 @@ langgraph-checkpoint-postgres>=2.0.0
 PyJWT>=2.9.0
 fastapi
 mcp>=1.10,<2
+cryptography>=42.0.0
 
 # FastAPI app (also listed in api/requirements.txt)
 #   pip install -r api/requirements.txt

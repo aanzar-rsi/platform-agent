@@ -206,6 +206,7 @@ export interface MCPServer {
   tools_count?: number;
   connected?: boolean;
   metadata?: Record<string, unknown>;
+  auth?: MCPLoginAuth;
   created_at?: string;
   updated_at?: string;
   // Compat fields used by older UI
@@ -217,6 +218,17 @@ export interface MCPServer {
   connection_status?: 'connected' | 'disconnected' | 'error';
   is_connected?: boolean;
   last_connected?: string;
+}
+
+export interface MCPLoginAuth {
+  login_url: string;
+  username: string;
+  password?: string;
+  use_agent_credentials?: boolean;
+  username_field?: string;
+  password_field?: string;
+  token_field?: string;
+  password_configured?: boolean;
 }
 
 export interface HealthResponse {
@@ -394,6 +406,7 @@ export interface MCPServerCreateRequest {
   retry_attempts?: number;
   retry_delay?: number;
   enabled?: boolean;
+  auth?: MCPLoginAuth | null;
 }
 
 export interface MCPServerUpdateRequest {
@@ -406,6 +419,7 @@ export interface MCPServerUpdateRequest {
   metadata?: Record<string, unknown>;
   description?: string;
   enabled?: boolean;
+  auth?: MCPLoginAuth | null;
 }
 
 export interface MCPServerDetails {
@@ -792,6 +806,7 @@ function normalizeMcp(s: Record<string, unknown>): MCPServer {
     tools_count: Number(s.tools_count || 0),
     connected,
     metadata: (s.metadata as Record<string, unknown>) || {},
+    auth: s.auth as MCPLoginAuth | undefined,
     created_at: s.created_at as string | undefined,
     updated_at: s.updated_at as string | undefined,
     enabled: s.enabled !== false,
@@ -823,6 +838,7 @@ export const mcpAPI = {
       args: request.args,
       env: request.env,
       enabled: request.enabled,
+      auth: request.auth,
       metadata: {
         ...(request.metadata || {}),
         ...(request.description ? { description: request.description } : {}),
@@ -840,6 +856,7 @@ export const mcpAPI = {
       args: request.args,
       env: request.env,
       enabled: request.enabled,
+      auth: request.auth,
       metadata: request.metadata ?? (request.description ? { description: request.description } : undefined),
     });
     return { success: true, message: 'updated', server: normalizeMcp(response.data) };

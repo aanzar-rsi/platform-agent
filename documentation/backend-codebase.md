@@ -23,7 +23,7 @@ agent_node --conditional route--> tool | subagent | context selector | human inp
         ^                                  |             |                 |
         +----------------------------------+-------------+-----------------+
 
-Idle learner (separate graph): load checkpoint -> extract experience chunks -> persist vectors/chunks
+Idle learner (separate graph): load checkpoint -> extract governed memories -> persist KB versions/index
 ```
 
 ## Repository Map
@@ -39,7 +39,7 @@ Idle learner (separate graph): load checkpoint -> extract experience chunks -> p
 | Terminal UI | Login, chat commands, Rich rendering and interrupts | `src/cli/` |
 | HTTP API | Routes, services, authentication, WebSocket protocol | `api/` |
 | Persistence | PostgreSQL repositories and LangGraph checkpointer | `api/db/`, `src/utils/postgres_checkpointer.py` |
-| Learning agent | Derives and retrieves reusable tool-decision advice | `src/subagents/learner_agent/` |
+| Learning agent | Derives and retrieves governed decision-aware memory | `src/subagents/learner_agent/` |
 | Tests | Focused behavior and integration coverage | `tests/` |
 
 ## Startup and Configuration
@@ -233,7 +233,7 @@ Structured values use TOON serialization via the `toons` library rather than pre
 - When a user question is justified.
 - The exact XML-like output shape that `agent_node` parses.
 
-`src/subagents/learner_agent/prompts/extract_tool_chunks.txt` is the learner's separate prompt. It asks for JSON chunks of situation-to-next-decision advice based on a completed trajectory.
+`src/subagents/learner_agent/prompts/extract_memory_chunks.txt` is the learner's separate prompt. It asks for validated JSON memories from bounded conversation, Armory, child-agent, and decision-state evidence.
 
 ## Memory Model
 
@@ -385,7 +385,7 @@ Rollback stores a one-shot checkpoint pointer on the chat. The next turn uses it
 
 ## Learning Agent and Experience System
 
-The learner is not a planner-callable sub-agent. It is an independent background LangGraph workflow that turns completed agent trajectories into reusable advice.
+The learner is not a planner-callable sub-agent. It is an independent background LangGraph workflow that turns bounded conversation and execution evidence into governed advisory memory.
 
 ### Learner graph
 
@@ -403,33 +403,31 @@ START -> load_session -> extract_chunks -> persist -> END
 
 - The latest user query.
 - A compact recent message summary.
-- A slimmed execution history with result previews.
+- Structured recent conversation messages.
+- A slimmed Armory/child execution history with result previews and preserved child spawn parameters.
+- Entry, transition, and recovery decision snapshots.
+- Effective per-type write and confirmation state.
 
-Chats with no checkpoint state or no tool/sub-agent history are skipped. Learning is therefore trajectory-based, not an automatic summary of every conversation.
+Chats with no checkpoint state or no conversation/execution evidence are skipped. Conversation-only sessions can produce durable preferences or professional context when evidence is explicit and reusable.
 
 ### Step 2: extract reusable advice
 
-`extract_chunks_node()` renders `extract_tool_chunks.txt` and calls the shared `src/models/llm_client.py` at low temperature. The prompt requests zero or more JSON chunks that describe a useful next-decision lesson, not an unrestricted conversation summary.
+`extract_chunks_node()` renders `extract_memory_chunks.txt` and calls the shared `src/models/llm_client.py` once at low temperature. It can produce resource, user preference, user details, tenant details, workflow, troubleshooting, and anti-pattern chunks.
 
 A normalized experience chunk includes:
 
-- A generated `exp_*` ID.
-- `embed_text`: current user query plus the prior task/tool, which matches the later retrieval situation.
-- `advice`: imperative guidance for choosing or parameterizing the observed tool.
-- Metadata: user ID, source chat, prior task/tool, observed tool, arguments, result summary, outcome, learning, and timestamp.
+- A deterministic evidence ID and stable semantic key.
+- Bounded search text and reusable content.
+- Sensitivity and memory weight.
+- Validated type metadata, retrieval cues, preconditions, and decision stage.
 
-The learner skips empty advice and can produce no chunks when a trajectory has no meaningful lesson.
+Deterministic validation rejects secrets, protected-trait profiling, unknown metadata values, unsupported resource names, and invalid candidates. The learner can produce no chunks when evidence has no durable lesson.
 
 ### Step 3: persist and index
 
-`persist_node()` calls `add_chunks()`.
+`persist_node()` revalidates USER/type write policy and uses the shared governed KB. PostgreSQL stores append-only versions and is authoritative; Chroma indexes active versions. Replayed evidence is skipped, equivalent content reinforces weight, changed content appends a version, and direct unresolved contradictions are kept separate.
 
-- Chunk documents append to `data/experience/chunks.jsonl`.
-- Vectors are stored by chunk ID in `data/experience/vectors.json`.
-- A process-local re-entrant lock guards reads/writes.
-- Per-chunk embedding failures are soft failures; only successfully embedded chunks are persisted.
-
-Embeddings come from `src/models/embeddings.py`. `EMBED_METHOD=hf` uses a cached-or-downloaded Sentence Transformer. `EMBED_METHOD=numpy` uses a deterministic hashing bag-of-words vectorizer and avoids model loading.
+Broader publication is a separate admin-reviewed lifecycle. Request and review revalidate target scope, chunk type, publish permission, and `allow_admin_promotion`; AGENT publication rejects deterministic private identifiers and configurations. Validation failures become terminal `PROMOTION_FAILED` records while the source remains active. Published targets support revocation/demotion, timezone-aware expiry, and validated retention classes.
 
 ### Idle scheduling and branch handling
 
@@ -439,9 +437,9 @@ This is branch-aware: a rollback/fork can leave a non-active branch that still r
 
 ### Retrieval in the main agent
 
-Before each planner LLM call, `agent_node` retrieves up to `EXPERIENCE_TOP_K` cosine-similar chunks using the current query plus prior task/tool. Results are filtered to the authenticated user when a user ID is present. `format_experiences_for_prompt()` presents advice, observed tool, outcome, and similarity score in the planner prompt.
+Before each fast-classifier or planner LLM call, `agent_node` retrieves up to `EXPERIENCE_TOP_K` memories using entry, transition, or recovery query lanes. Results are deduplicated, authorized by scope and type, revalidated against PostgreSQL, stage-adjusted, and filtered against currently available resources. `format_experiences_for_prompt()` groups them by governed type.
 
-Retrieval has a hard four-second wait bound in a small thread pool. A disabled system, empty store, embedding failure, timeout, or any exception simply produces no advice. Learned experiences are explicitly framed in the prompt as optional guidance, not authoritative instructions.
+Retrieval has a hard four-second wait bound in a small thread pool. A disabled system, empty store, embedding failure, timeout, or any exception simply produces no advice. Learned memory is explicitly framed as untrusted advisory context that cannot grant resources or policy and is overridden by current instructions.
 
 ### Experience API view
 
@@ -911,22 +909,22 @@ IdleWatcher tick
   -> mark_leaf_learned(chat_id, leaf, status)
 ```
 
-`load_session_node()` deliberately skips trajectories without execution history. The present learner is designed to improve tool/sub-agent decision-making, not to learn from pure conversational answers.
+`load_session_node()` accepts conversation-only evidence as well as Armory and child-agent trajectories, while requiring explicit durable evidence for preferences and user details.
 
-`extract_chunks_node()` asks for high-signal advice. The schema records the prior situation and the observed tool. `_normalize_chunk()` fills omitted LLM fields from adjacent structured history where possible, creates IDs, bounds summary fields, and generates `embed_text` with `build_embed_text()`.
+`extract_chunks_node()` asks for high-signal memories across the seven governed types. `_normalize_chunk()` validates metadata, sensitivity, weight, semantic/evidence identity, profiling boundaries, secrets, and observed resources.
 
-`vector_store.add_chunks()` embeds each chunk separately. It persists a vector only when embedding succeeds, then appends corresponding human-readable chunks. This prevents a search result from referring to a missing vector, although an interrupted process between the two file writes can still leave partial file state that should be inspected during recovery.
+`persist_node()` writes through `src/agent/kb.py`. PostgreSQL and an outbox provide the durable boundary; Chroma can be rebuilt from active PostgreSQL versions.
 
-`retrieve_experiences()` builds the same situation key from current query plus prior task/tool, scores stored vectors by cosine similarity, filters other users' chunks when `uid` is supplied, and returns top-k rows. `agent_node()` wraps this in `_safe_learned_experiences()` so retrieval cannot stall the planner longer than four seconds.
+`retrieve_experiences()` derives current decision state, searches stage-specific type lanes, deduplicates candidates, and filters unavailable resources. `agent_node()` wraps this in `_safe_learned_experiences()` so retrieval cannot stall either fast or planner decisions longer than four seconds.
 
 #### Learning-agent diagnostic table
 
 | Symptom | Where to look | Explanation |
 |---|---|---|
-| No experiences ever appear | `EXPERIENCE_ENABLED`, idle duration, `sessions_ready_to_learn()` | The chat must be idle and contain execution history. |
+| No experiences ever appear | `EXPERIENCE_ENABLED`, idle duration, `sessions_ready_to_learn()` | The chat must be idle and contain durable conversation or execution evidence. |
 | A chat never becomes eligible | `last_activity_at`, active runtime/CLI markers | Active chats are intentionally skipped. |
 | Learner runs but stores zero chunks | `learner.extract` event and extraction prompt/output | The LLM may have found no high-signal tool lesson. |
-| `stored_count=0` after chunks extracted | embedding logs and `EMBED_METHOD` | `try_embed_text()` soft-failed; use `numpy` to isolate model-download issues. |
+| `stored_count=0` after chunks extracted | KB traces/outbox and embedding logs | Evidence may already be processed, or KB/indexing may have soft-failed. |
 | Experiences retrieved for wrong user | chunk metadata and retrieval `uid` | User filtering happens only when the caller supplies a UID. Main agent does. |
 | Same branch keeps processing | `chat_branch_learn_state` | Error status intentionally retries; learned/skipped do not. |
 | Planner is slow before LLM call | learner retrieval timeout logs | Retrieval uses a four-second cap; inspect embedding startup/availability. |

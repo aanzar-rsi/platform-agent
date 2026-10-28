@@ -6,10 +6,9 @@ No LLM. Agent routes here with next_step:
 Always returns to agent_node with updated context_memory.
 """
 
-from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
-from src.agent.control import NOT_PAUSED, maybe_pause, note_text_from_resume
-from src.agent.memory import record_human_input, update_context_memory
+from src.agent.control import pause_gate_active, thread_id_from_config
+from src.agent.memory import update_context_memory
 from src.agent.state import PlanExecuteState
 
 
@@ -23,32 +22,17 @@ def _coerce_token(value, default=None):
 
 
 def context_selector_node(state: PlanExecuteState, config: RunnableConfig | None = None) -> dict:
-    paused_resume = maybe_pause(config, node="context_selector")
-    if paused_resume is not NOT_PAUSED:
-        note = note_text_from_resume(paused_resume).strip()
-        if note:
-            history, memory, context = record_human_input(
-                state.get("execution_history"), state.get("execution_memory"), state.get("context_memory"),
-                value=note, description="User instruction supplied while context selection was paused",
-                task=(state.get("next_step") or {}).get("task") or "",
-            )
-            return {
-                "messages": [
-                    HumanMessage(
-                        content=note,
-                        additional_kwargs={
-                            "ui_hidden": True,
-                            "ui_step": {"type": "reasoning", "content": f"User response: {note}"},
-                        },
-                    )
-                ],
-                "execution_history": history,
-                "execution_memory": memory,
-                "context_memory": context,
-            }
-        return {}
-
     next_step = state.get("next_step") or {}
+    if pause_gate_active(thread_id_from_config(config), "context_selector"):
+        return {
+            "pending_context_selection": dict(next_step),
+            "human_request_kind": "context_pause",
+            "next_step": {
+                "action": "ask_user", "action_id": next_step.get("action_id"),
+                "question": "Context selection was paused. Add an instruction or resume.",
+                "task": next_step.get("task") or "Resume context selection",
+            },
+        }
     key = next_step.get("key") or ""
     from_token = _coerce_token(next_step.get("from_token"), 0) or 0
     to_token = _coerce_token(next_step.get("to_token"), None)
@@ -89,4 +73,8 @@ def context_selector_node(state: PlanExecuteState, config: RunnableConfig | None
     except Exception:
         pass
 
-    return {"context_memory": context_memory}
+    phase_index = int(state.get("planned_phase_index") or 0) + 1
+    phases = state.get("planned_phases") or []
+    return {"context_memory": context_memory, "pending_context_selection": {},
+            "human_request_kind": "", "next_step": {}, "planned_phase_index": phase_index,
+            "planned_phases": [] if phase_index >= len(phases) else phases}

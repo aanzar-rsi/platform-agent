@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage
-
 from src.agent.agent_core import AgentCore, Policy, child_runner
-from src.agent.memory import record_execution
+from src.agent.nodes.output_security_gate import sanitize_executor_output
+from src.agent.nodes.result_collector import branch_result
 
 
 def _requested_policy(raw: dict | None) -> Policy | None:
@@ -50,9 +49,6 @@ def child_agent_node(state: dict, config=None) -> dict:
     if uid and "uid" not in preloaded_context:
         preloaded_context["uid"] = uid
 
-    execution_history = list(state.get("execution_history") or [])
-    execution_memory = dict(state.get("execution_memory") or {})
-    context_memory = state.get("context_memory")
     calls = (state.get("next_step") or {}).get("child_calls") or []
     if not isinstance(calls, list):
         calls = []
@@ -105,46 +101,30 @@ def child_agent_node(state: dict, config=None) -> dict:
             "task": (state.get("next_step") or {}).get("task") or "Spawn child agents",
             "status": "failed", "success": False,
         }]
-    for entry in spawned:
-        step_key = f"child_agent_{len(execution_history) + 1}"
-        value = {"summary": summary, "child_agent_id": entry.get("child_agent_id"),
-                 "status": entry["status"]}
-        execution_memory, context_memory, stored = record_execution(
-            execution_memory, context_memory, key=step_key, value=value,
-            description=entry.get("task") or "Child-agent spawn result",
-            entry_type="child_agent", name="child_agent", task=entry.get("task") or "",
-            success=entry["success"], metadata={k: v for k, v in entry.items() if k not in {"type", "result"}},
-        )
-        entry.update(stored)
-        execution_history.append(entry)
-
-    return {
-        "messages": [
-            AIMessage(
-                content=summary,
-                additional_kwargs={"ui_hidden": True},
-            )
-        ],
-        "execution_history": execution_history,
-        "execution_memory": execution_memory,
-        "context_memory": context_memory,
-    }
+    return _envelope(state, [{
+        "kind": "child_spawn",
+        "value": {"summary": summary, "child_agent_id": entry.get("child_agent_id"),
+                  "status": entry["status"]},
+        "success": entry["success"], "status": entry["status"], "name": "child_agent",
+        "task": entry.get("task") or "Spawn child agents",
+        "description": entry.get("task") or "Child-agent spawn result",
+        "metadata": {"child_agent_id": entry.get("child_agent_id"),
+                     "tool_args": entry.get("tool_args") or {},
+                     "requested_policy": entry.get("requested_policy")},
+    } for entry in spawned])
 
 
 def _record_failure(state: dict, message: str) -> dict:
-    history = list(state.get("execution_history") or [])
-    key = f"child_agent_{len(history) + 1}"
     task = (state.get("next_step") or {}).get("task") or "Spawn child agents"
-    memory, context, entry = record_execution(
-        state.get("execution_memory"), state.get("context_memory"), key=key,
-        value={"success": False, "error": message}, description=task,
-        entry_type="child_agent", name="child_agent", task=task, success=False,
-        metadata={"status": "failed"},
-    )
-    history.append(entry)
-    return {
-        "messages": [AIMessage(content=message, additional_kwargs={"ui_hidden": True})],
-        "execution_history": history,
-        "execution_memory": memory,
-        "context_memory": context,
-    }
+    return _envelope(state, [{"kind": "child_spawn", "value": {"error": message},
+                              "success": False, "status": "failed", "name": "child_agent",
+                              "task": task, "description": task, "metadata": {}}])
+
+
+def _envelope(state: dict, results: list[dict]) -> dict:
+    next_step = state.get("next_step") or {}
+    envelope = sanitize_executor_output({
+        "version": 1, "action_id": next_step.get("action_id"),
+        "source": "child_agent", "results": results,
+    })
+    return branch_result(state, envelope)

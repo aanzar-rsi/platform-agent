@@ -99,6 +99,7 @@ export interface SubagentProgressEvent {
   detail?: unknown;
   /** True once a reasoning block has finished streaming (no more deltas coming). */
   reasoningDone?: boolean;
+  action_id?: string;
 }
 
 export interface SubagentCallEvent {
@@ -120,7 +121,7 @@ export interface SubagentCallEvent {
 export type ChildAgentCallEvent = SubagentCallEvent;
 
 export type AgentStep =
-  | { type: 'reasoning'; content: string }
+  | { type: 'reasoning'; content: string; done?: boolean }
   | { type: 'tool'; tool: ToolCallEvent }
   | { type: 'subagent'; subagent: SubagentCallEvent }
   | { type: 'child_agent'; child: ChildAgentCallEvent };

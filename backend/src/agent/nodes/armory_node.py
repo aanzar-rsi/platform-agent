@@ -1,11 +1,10 @@
 """Unified graph adapter for every executable armory resource."""
 
-from langchain_core.messages import AIMessage, HumanMessage
 from src.agent.control import clear_pause, note_text_from_resume, pause_gate_active, thread_id_from_config
 from src.agent.facets import Armory
-from src.agent.memory import count_content_tokens, record_execution, record_human_input
+from src.agent.nodes.output_security_gate import sanitize_executor_output
+from src.agent.nodes.result_collector import branch_result
 from src.agent.subagent_stream import emit_subagent_event
-from src.utils.text_truncate import truncate_for_aimessage
 
 
 def armory_node(state: dict, config=None) -> dict:
@@ -13,10 +12,7 @@ def armory_node(state: dict, config=None) -> dict:
     resource_type = next_step.get("resource_type", "")
     resource_name = next_step.get("resource_name", "")
     arguments = next_step.get("arguments", {})
-    task = state.get("current_task") or next_step.get("task") or ""
-    history = list(state.get("execution_history", []))
-    memory = dict(state.get("execution_memory", {}))
-    context_memory = state.get("context_memory")
+    task = next_step.get("task") or state.get("current_task") or ""
     configurable = (config or {}).get("configurable") or {}
     policy = ((configurable.get("policy") or {}).get("armory") or {})
     armory = Armory(policy, user_id=configurable.get("owner_id"),
@@ -36,21 +32,20 @@ def armory_node(state: dict, config=None) -> dict:
             clear_pause(thread_id)
         note = note_text_from_resume(decision).strip()
         approved = not confirm or (isinstance(decision, dict) and bool(decision.get("approved")))
-        if note:
-            history, memory, context_memory = record_human_input(
-                history, memory, context_memory, value=note,
-                description="User response at armory approval or pause gate", task=task)
         if paused and not confirm:
-            return ({"messages": [HumanMessage(content=note, additional_kwargs={"ui_hidden": True})],
-                     "execution_history": history, "execution_memory": memory,
-                     "context_memory": context_memory} if note else {})
+            return _envelope(state, next_step, "armory", [{
+                "kind": "human_input", "value": note or "(no answer provided)", "success": True,
+                "task": task, "description": "User response at armory pause gate",
+                "metadata": {"input_kind": "paused"},
+            }])
         if not approved:
-            return _record(resource_type, resource_name, arguments, task,
-                           {"success": False, "error": "User declined to run this resource."}, None,
-                           history, memory, context_memory)
+            result, structured = {"success": False, "error": "User declined to run this resource."}, None
+            return _result_envelope(state, next_step, resource_type, resource_name, arguments, task,
+                                    result, structured, note=note)
 
     if resource_type == "subagent":
-        emit_subagent_event(resource_name, {"kind": "start", "message": "Starting"})
+        emit_subagent_event(resource_name, {"kind": "start", "message": "Starting",
+                                             "action_id": next_step.get("action_id")})
     try:
         result, structured = armory.call(resource_type, resource_name, arguments, task=task, reconnect=True)
         success = not (isinstance(result, dict) and result.get("success") is False)
@@ -58,32 +53,30 @@ def armory_node(state: dict, config=None) -> dict:
         result, structured, success = {"success": False, "error": str(exc)}, None, False
     if resource_type == "subagent":
         emit_subagent_event(resource_name, {"kind": "complete" if success else "error",
-                                             "message": "Completed" if success else str(result)})
-    return _record(resource_type, resource_name, arguments, task, result, structured,
-                   history, memory, context_memory)
+                                             "message": "Completed" if success else str(result),
+                                             "action_id": next_step.get("action_id")})
+    return _result_envelope(state, next_step, resource_type, resource_name, arguments, task, result, structured,
+                            note=note if 'note' in locals() else "")
 
 
-def _record(resource_type, resource_name, arguments, task, result, structured,
-            history, memory, context_memory):
-    key = f"armory_{len(history) + 1}"
+def _envelope(state, next_step, source, results):
+    envelope = sanitize_executor_output({
+        "version": 1, "action_id": next_step.get("action_id"), "source": source, "results": results,
+    })
+    return branch_result(state, envelope)
+
+
+def _result_envelope(state, next_step, resource_type, resource_name, arguments, task, result, structured, *, note=""):
     success = not (isinstance(result, dict) and result.get("success") is False)
-    entry = {"type": "armory", "resource_type": resource_type, "resource_name": resource_name,
-             "resource": f"armory.{resource_type}.{resource_name}", "arguments": arguments,
-             "task": task, "key": key, "result": result, "success": success,
-             "structured": structured}
-    memory, context_memory, stored = record_execution(
-        memory, context_memory, key=key, value=result, description=task or entry["resource"],
-        entry_type="armory", name=resource_name, task=task, success=success,
-        metadata={"resource_type": resource_type, "resource_name": resource_name,
-                  "arguments": arguments, "structured": structured})
-    entry.update(stored)
-    history.append(entry)
-    count_content_tokens(result)
-    preview = truncate_for_aimessage(result)
-    ui_type = "subagent" if resource_type == "subagent" else "tool"
-    return {"messages": [AIMessage(content=f"{entry['resource']} result: {preview}",
-                                    additional_kwargs={"ui_hidden": True, "ui_step": {
-                                        "type": ui_type, ui_type: {"id": key, "name": resource_name,
-                                                                   "result": preview, "success": success}}})],
-            "execution_history": history, "execution_memory": memory,
-            "context_memory": context_memory}
+    results = []
+    if note:
+        results.append({"kind": "human_input", "value": note, "success": True, "task": task,
+                        "description": "User response at armory approval gate",
+                        "metadata": {"input_kind": "confirmation"}})
+    results.append({
+        "kind": "armory_result", "value": result, "success": success, "task": task,
+        "name": resource_name, "description": task or f"armory.{resource_type}.{resource_name}",
+        "metadata": {"resource_type": resource_type, "resource_name": resource_name,
+                     "arguments": arguments, "structured": structured},
+    })
+    return _envelope(state, next_step, "armory", results)

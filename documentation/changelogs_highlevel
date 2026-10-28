@@ -1,0 +1,47 @@
+# High-Level Changelog
+
+- 2026-10-27T16:46:03+00:00 — Completed child-run stability fixes so parent execution no longer fails when a child is still running at collection time: collection now remains in a running/pending state, retries cleanly, and preserves terminal child failures; also aligned child timeout runtime to the approved 10-minute window and tightened child-card/task UI behavior and context-memory prompt semantics.
+
+- 2026-10-27T09:09:58+00:00 — Reduced backend startup latency by removing the unconditional full memory-index rebuild from API readiness; interrupted indexing work now resumes in the background, with startup-phase timing logs.
+
+- 2026-10-27T07:30:00+00:00 — Integrated new-chat policy settings into the yellow New Chat control and added a form editor alongside the existing JSON editor.
+
+- 2026-10-27T06:30:00+00:00 — Improved Armory sidebar layout so policy, tools, subagents, and MCP servers use full-width cards, while connected MCP server tools and resources are visible in their server card.
+
+- 2026-10-27T00:00:00+00:00 — Redesigned Armory policy and catalog cards, added expandable tool/subagent/server details, and made Usage analytics refresh continuously during agent runs with clear cache labeling.
+
+- 2026-10-27T06:23:13+00:00 — Made agent execution-limit stops fail cleanly with actionable guidance instead of emitting an unexpected-error traceback.
+
+- 2026-10-27T06:26:04+00:00 — Redesigned the session Armory and Memory views for clearer navigation, readable content, stronger status summaries, search, and expandable details.
+
+- 2026-10-26T11:40:00+00:00 — Fixed learner extraction crashing when a completed session used an MCP-backed tool.
+
+- 2026-10-26T16:20:00+00:00 — Kept resource call names and IDs visible after live execution, and redesigned the session Usage tab for readable, fully padded metrics without horizontal overflow.
+
+- 2026-10-26T11:10:00+00:00 — Improved authenticated MCP setup with a default `/auth/login` URL, agent user-ID prefilling, immediate connected-state display after registration, and reliable reconnect cleanup.
+
+- 2026-10-26T09:40:00+00:00 — Fixed agent execution crashing when connected MCP tools were available to the planner.
+
+- 2026-10-26T14:15:00+00:00 — Made MCP connection failures visible in an automatically expanded Connection Logs section while adding or editing a server, with exact backend validation messages.
+
+- 2026-10-26T08:30:00+00:00 — Improved the MCP login setup form with clearly grouped credential and optional response-mapping fields, required-field markers, and explanatory guidance.
+
+- 2026-10-26T12:00:00+00:00 — Added the approved execution plan for expanding the learner into a governed, decision-aware memory system covering user context, Armory and child-agent guidance, workflows, corrections, retrieval, promotion, documentation, and dedicated Graphify outputs.
+- 2026-10-26T13:30:00+00:00 — Expanded the learner to capture seven governed memory types from conversation, Armory, and child-agent evidence, and deliver decision-aware advisory memory to both fast and planner decisions.
+- 2026-10-26T15:00:00+00:00 — Hardened governed memory publication with chunk-level admin-promotion controls, deterministic privacy checks, terminal failure records, retention classes, and complete retrieval traces.
+
+- 2026-10-26T08:20:00+00:00 — Added MCP server deletion controls and optional credentialed HTTP MCP connections that log in automatically, use bearer tokens, and refresh expired tokens once.
+
+- 2026-10-22T06:50:40+00:00 — Added mandatory changelog process and tracking files in `/docuemtation` for all future codebase changes.
+- 2026-10-22T07:08:27+00:00 — Centralized executor-output validation, deterministic sanitization, persistence, automatic context ingestion, trusted messages, and completion events in the output security gate.
+- 2026-10-22T07:08:27+00:00 — Preserved direct context-memory selection while routing context-selection pause notes through the existing human-input and output-security flow before selection resumes.
+- 2026-10-22T07:08:27+00:00 — Added focused regression coverage for output sanitization, memory commits, replay idempotency, bounded context ingestion, human output, and planned ordering.
+- 2026-10-22T09:31:35+00:00 — Unified direct and planned actions behind one execution dispatcher and one result collector, removing the duplicate hidden planned-step execution path.
+- 2026-10-22T09:31:35+00:00 — Simplified the graph so input security, result collection, output security, and context selection each have one fixed outgoing edge, with all routing decisions owned by the execution dispatcher.
+- 2026-10-22T07:20:29+00:00 — Split phased-planning node implementations into separate per-node scripts to enforce one-script-per-node consistency while keeping behavior unchanged.
+- 2026-10-22T10:04:02+00:00 — Cleaned stale compatibility artifacts from the graph module so it only exposes the active compiled execution graph.
+- 2026-10-22T10:31:16+00:00 — Hardened planner-response validation to reject malformed required XML tags (including incomplete `<data>`) and force deterministic replanning with explicit corrective feedback.
+- 2026-10-22T10:31:16+00:00 — Added focused planner-gate tests for malformed tag detection and retry-attempt incrementing to prevent repeat-cache loops on identical invalid planner outputs.
+- 2026-10-22T10:50:01+00:00 — Made LLM calls resilient to model groups that reject custom temperature values by automatically retrying with provider-default temperature, preventing runtime failures during agent streaming and sync calls.
+- 2026-10-26T07:41:37+00:00 — Restored visible chat execution activity after the unified dispatcher change: every LLM call now drives the bottom thinking status, and direct/planned tool and subagent calls stream their parameters and results again.
+- 2026-10-26T07:41:37+00:00 — Added stable lifecycle correlation so sequential, repeated, and parallel LLM/resource calls update the correct live UI entry.

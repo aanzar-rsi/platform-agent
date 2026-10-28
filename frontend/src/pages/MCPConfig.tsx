@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type Dispatch, type SetStateAction } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { mcpAPI, MCPServer, MCPServerCreateRequest, MCPServerDetails } from "@/lib/api";
+import { defaultMcpLoginUrl, mcpErrorLogs, mcpErrorMessage, type ConnectionLog } from "@/lib/mcpErrors";
 import { useAuth } from "@/hooks/use-auth";
 import HeaderNavbar from "@/components/HeaderNavbar";
 import Breadcrumb from "@/components/Breadcrumb";
@@ -30,10 +31,122 @@ import {
 type ViewMode = 'list' | 'add' | 'edit' | 'details';
 type ConnectionStatus = 'connected' | 'disconnected' | 'error' | 'connecting';
 
+function ConnectionLogs({ logs, collapsed, setCollapsed }: {
+  logs: ConnectionLog[];
+  collapsed: boolean;
+  setCollapsed: (collapsed: boolean) => void;
+}) {
+  return (
+    <div className="mt-6 pt-6 border-t border-[#171717]/10">
+      <button
+        type="button"
+        onClick={() => setCollapsed(!collapsed)}
+        className="flex items-center gap-3 text-[#171717] hover:text-[#171717]/80 transition-colors group w-full text-left mb-3"
+      >
+        <MessageSquare className="h-5 w-5 text-[#171717]" />
+        <h3 className="font-semibold text-[#171717] flex-1">
+          Connection Logs
+          {logs.length > 0 && <Badge variant="outline" className="border-[#171717] text-[#171717] bg-[#171717]/10 ml-2 rounded-xl">{logs.length}</Badge>}
+        </h3>
+        {collapsed ? <ChevronRight className="h-5 w-5" /> : <ChevronDown className="h-5 w-5" />}
+      </button>
+      {!collapsed && (logs.length === 0 ? (
+        <div className="text-center py-8 rounded-2xl bg-[#fffeff] border-2 border-[#171717]/20">
+          <MessageSquare className="h-10 w-10 mx-auto text-[#171717] mb-3" />
+          <p className="text-[#171717] text-sm">No connection logs available. Click Connect to see connection process logs.</p>
+        </div>
+      ) : (
+        <div className="rounded-2xl border-2 border-[#171717]/20 bg-[#fffeff] p-4 max-h-96 overflow-y-auto shadow-inner">
+          <div className="space-y-2 font-mono text-xs">
+            {logs.map((log, idx) => {
+              const levelColor = { INFO: 'text-neutral-600', DEBUG: 'text-gray-600', WARNING: 'text-yellow-600', ERROR: 'text-red-600' }[log.level] || 'text-gray-600';
+              const bgColor = { INFO: 'bg-neutral-500/10 border-neutral-500/30', DEBUG: 'bg-gray-500/10 border-gray-500/30', WARNING: 'bg-yellow-500/10 border-yellow-500/30', ERROR: 'bg-red-500/10 border-red-500/30' }[log.level] || 'bg-gray-500/10 border-gray-500/30';
+              return (
+                <div key={idx} className={`flex gap-3 py-2 px-3 rounded-xl border-2 ${bgColor}`}>
+                  <span className="text-[#171717] shrink-0 text-[10px] pt-0.5">{log.timestamp}</span>
+                  <span className={`shrink-0 font-semibold ${levelColor} min-w-15`}>[{log.level}]</span>
+                  <span className="text-[#171717] flex-1 wrap-break-word leading-relaxed">{log.message}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AuthFields({ formData, setFormData, userId }: { formData: MCPServerCreateRequest; setFormData: Dispatch<SetStateAction<MCPServerCreateRequest>>; userId: string }) {
+  const auth = formData.auth;
+  const setAuth = (next: MCPServerCreateRequest['auth']) => setFormData({ ...formData, auth: next });
+  const fieldClass = "bg-[#fffeff] border-2 border-[#171717]/20 hover:border-[#171717]/40 text-[#171717] placeholder:text-gray-500 rounded-xl";
+  return (
+    <div className="space-y-5 rounded-xl border-2 border-[#171717]/20 bg-[#171717]/[0.02] p-5">
+      <div className="flex items-start gap-3">
+        <Checkbox id="requires-login" checked={Boolean(auth)} onCheckedChange={(checked) => setAuth(checked ? { login_url: defaultMcpLoginUrl(formData.url || ''), username: userId, password: '', use_agent_credentials: true, username_field: 'username', password_field: 'password', token_field: 'access_token' } : null)} />
+        <div className="space-y-1">
+          <Label htmlFor="requires-login" className="cursor-pointer text-[#171717] font-semibold">Requires login</Label>
+          <p className="text-xs text-gray-600">Use this when the MCP server requires a JSON login request before its HTTP connection can start.</p>
+        </div>
+      </div>
+      {auth && <>
+        <div>
+          <h3 className="text-sm font-semibold text-[#171717]">Login credentials</h3>
+          <p className="mt-1 text-xs text-gray-600">All fields in this section are required. The password is encrypted and never displayed after saving.</p>
+        </div>
+        <div className="flex items-start gap-3 rounded-xl border border-[#171717]/15 bg-white p-3">
+          <Checkbox id="use-agent-credentials" checked={auth.use_agent_credentials !== false} onCheckedChange={(checked) => setAuth({ ...auth, use_agent_credentials: checked === true, username: checked ? userId : '' })} />
+          <div className="space-y-1">
+            <Label htmlFor="use-agent-credentials" className="cursor-pointer text-[#171717] font-medium">Use agent credentials</Label>
+            <p className="text-xs text-gray-600">Uses your signed-in user ID. Enter your password below; it is not read from your agent session.</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          <div className="space-y-2 md:col-span-2">
+            <Label htmlFor="mcp-login-url" className="text-[#171717] font-medium">Login URL <span className="text-red-600">*</span></Label>
+            <Input id="mcp-login-url" type="url" placeholder="https://example.com/api/login" value={auth.login_url} onChange={(e) => setAuth({ ...auth, login_url: e.target.value })} className={fieldClass} />
+            <p className="text-xs text-gray-600">The endpoint that accepts credentials and returns the access token.</p>
+          </div>
+          {auth.use_agent_credentials === false && <div className="space-y-2">
+            <Label htmlFor="mcp-login-username" className="text-[#171717] font-medium">Username <span className="text-red-600">*</span></Label>
+            <Input id="mcp-login-username" autoComplete="username" placeholder="service-account@example.com" value={auth.username} onChange={(e) => setAuth({ ...auth, username: e.target.value })} className={fieldClass} />
+          </div>}
+          <div className="space-y-2">
+            <Label htmlFor="mcp-login-password" className="text-[#171717] font-medium">Password <span className="text-red-600">*</span></Label>
+            <Input id="mcp-login-password" type="password" autoComplete="current-password" placeholder={auth.password_configured ? 'Saved — enter a new value to replace it' : 'Enter password'} value={auth.password || ''} onChange={(e) => setAuth({ ...auth, password: e.target.value })} className={fieldClass} />
+            {auth.password_configured && <p className="text-xs text-gray-600">Leave blank to keep the saved password.</p>}
+          </div>
+        </div>
+        <div className="border-t border-[#171717]/10 pt-5">
+          <h3 className="text-sm font-semibold text-[#171717]">Response mapping <Badge variant="outline" className="ml-2 border-[#171717]/30 text-[#171717]">Optional</Badge></h3>
+          <p className="mt-1 mb-4 text-xs text-gray-600">Change these only if the login API uses names other than the defaults shown below.</p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            <div className="space-y-2">
+              <Label htmlFor="mcp-username-field" className="text-[#171717] font-medium">Username JSON field</Label>
+              <Input id="mcp-username-field" placeholder="username" value={auth.username_field || 'username'} onChange={(e) => setAuth({ ...auth, username_field: e.target.value })} className={fieldClass} />
+              <p className="text-xs text-gray-600">Default: <code>username</code></p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="mcp-password-field" className="text-[#171717] font-medium">Password JSON field</Label>
+              <Input id="mcp-password-field" placeholder="password" value={auth.password_field || 'password'} onChange={(e) => setAuth({ ...auth, password_field: e.target.value })} className={fieldClass} />
+              <p className="text-xs text-gray-600">Default: <code>password</code></p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="mcp-token-field" className="text-[#171717] font-medium">Token response field</Label>
+              <Input id="mcp-token-field" placeholder="access_token" value={auth.token_field || 'access_token'} onChange={(e) => setAuth({ ...auth, token_field: e.target.value })} className={fieldClass} />
+              <p className="text-xs text-gray-600">Default: <code>access_token</code></p>
+            </div>
+          </div>
+        </div>
+      </>}
+    </div>
+  );
+}
+
 export default function MCPConfig({ embedded = false }: { embedded?: boolean }) {
   const navigate = useNavigate();
   const location = useLocation();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
@@ -48,7 +161,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
   const [editConfig, setEditConfig] = useState<MCPServerCreateRequest | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [connectingAll, setConnectingAll] = useState(false);
-  const [connectionLogs, setConnectionLogs] = useState<Array<{ timestamp: string; level: string; message: string }>>([]);
+  const [connectionLogs, setConnectionLogs] = useState<ConnectionLog[]>([]);
   const [collapsedServers, setCollapsedServers] = useState<Set<string>>(new Set());
   const [allToolsByServer, setAllToolsByServer] = useState<Map<string, { serverName: string; tools: any[]; connected: boolean }>>(new Map());
   const [connectionLogsCollapsed, setConnectionLogsCollapsed] = useState(true);
@@ -56,6 +169,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
   const [argsText, setArgsText] = useState('[]');
   const [envText, setEnvText] = useState('{}');
   const [connectionErrors, setConnectionErrors] = useState<Record<string, string>>({});
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   // Form state
   const [formData, setFormData] = useState<MCPServerCreateRequest>({
@@ -279,11 +393,16 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
         setConnectionErrors(prev => ({ ...prev, [response.server.id]: response.server.connection_error || 'Connection failed' }));
         toast.error(`Server registered; connection failed: ${response.server.connection_error}`);
       }
+      setServers(prev => [...prev.filter(server => server.id !== response.server.id), response.server]);
+      setConnectionErrors(prev => { const next = { ...prev }; delete next[response.server.id]; return next; });
       setViewMode('list');
       resetForm();
-      loadServers();
+      await loadServers();
     } catch (error: any) {
-      toast.error(`Failed to create server: ${error.message}`);
+      const logs = mcpErrorLogs(error);
+      setConnectionLogs(logs);
+      setConnectionLogsCollapsed(false);
+      toast.error(`Failed to create server: ${logs[0].message}`);
     }
   };
 
@@ -303,7 +422,10 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
       setSelectedServerId(null);
       loadServers();
     } catch (error: any) {
-      toast.error(`Failed to update server: ${error.message}`);
+      const logs = mcpErrorLogs(error);
+      setConnectionLogs(logs);
+      setConnectionLogsCollapsed(false);
+      toast.error(`Failed to update server: ${logs[0].message}`);
     }
   };
 
@@ -311,15 +433,19 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
     if (!confirm("Are you sure you want to delete this server?")) return;
 
     try {
+      setDeleting(serverId);
       await mcpAPI.deleteServer(serverId);
       toast.success("Server deleted successfully");
       loadServers();
       if (selectedServerId === serverId) {
         setViewMode('list');
         setSelectedServerId(null);
+        setServerDetails(null);
       }
     } catch (error: any) {
       toast.error(`Failed to delete server: ${error.message}`);
+    } finally {
+      setDeleting(null);
     }
   };
 
@@ -346,12 +472,10 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
         await loadServers();
       }
     } catch (error: any) {
-      const detail = error.response?.data?.detail;
-      const message = typeof detail === 'string' ? detail : detail?.message || error.message;
-      if (detail?.logs?.length) {
-        setConnectionLogs(detail.logs);
-        setConnectionLogsCollapsed(false);
-      }
+      const logs = mcpErrorLogs(error);
+      const message = mcpErrorMessage(error);
+      setConnectionLogs(logs);
+      setConnectionLogsCollapsed(false);
       setConnectionErrors(prev => ({ ...prev, [serverId]: message }));
       toast.error(message);
       await loadServers();
@@ -436,6 +560,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
       retry_attempts: server.retry_attempts,
       retry_delay: server.retry_delay,
       enabled: server.enabled
+      ,auth: server.auth ? { ...server.auth, password: '' } : undefined
     });
     setViewMode('edit');
   };
@@ -744,6 +869,10 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
                               >
                                 <Edit className="h-3 w-3" />
                               </Button>
+                              <Button variant="outline" size="sm" onClick={() => handleDeleteServer(server.id)} disabled={deleting === server.id}
+                                className="border-2 border-red-300 hover:bg-red-600 text-red-700 hover:text-white h-7 w-7 p-0 transition-all rounded-lg" title="Delete">
+                                {deleting === server.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                              </Button>
                               {isCurrentlyConnected ? (
                                 <Button
                                   variant="outline"
@@ -834,7 +963,18 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
                   <Input
                     id="url"
                     value={formData.url || ''}
-                    onChange={(e) => setFormData({ ...formData, url: e.target.value, command: e.target.value ? undefined : formData.command, transport: e.target.value ? (formData.transport === 'sse' ? 'sse' : 'streamable_http') : formData.transport })}
+                    onChange={(e) => setFormData({
+                      ...formData,
+                      url: e.target.value,
+                      command: e.target.value ? undefined : formData.command,
+                      transport: e.target.value ? (formData.transport === 'sse' ? 'sse' : 'streamable_http') : formData.transport,
+                      auth: formData.auth ? {
+                        ...formData.auth,
+                        login_url: !formData.auth.login_url || formData.auth.login_url === defaultMcpLoginUrl(formData.url || '')
+                          ? defaultMcpLoginUrl(e.target.value)
+                          : formData.auth.login_url,
+                      } : formData.auth,
+                    })}
                     placeholder="http://localhost:8000/mcp"
                     className="bg-[#fffeff] border-2 border-[#171717]/20 hover:border-[#171717]/40 text-[#171717] placeholder:text-gray-500 rounded-xl"
                   />
@@ -869,6 +1009,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
                 <Textarea id="env" value={envText} onChange={(e) => setEnvText(e.target.value)}
                   placeholder='{"API_KEY":"value"}' />
               </div>
+              {formData.url && <AuthFields formData={formData} setFormData={setFormData} userId={user?.uid || user?.user_id || ''} />}
 
               <div className="space-y-2">
                 <Label htmlFor="description" className="text-[#171717] font-medium">Description</Label>
@@ -937,6 +1078,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
                   {viewMode === 'add' ? 'Create Server' : 'Save Changes'}
                 </Button>
               </div>
+              <ConnectionLogs logs={connectionLogs} collapsed={connectionLogsCollapsed} setCollapsed={setConnectionLogsCollapsed} />
             </CardContent>
           </Card>
         )}
@@ -987,6 +1129,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
                                     retry_attempts: current.retry_attempts,
                                     retry_delay: current.retry_delay,
                                     enabled: current.enabled,
+                                    auth: current.auth ? { ...current.auth, password: '' } : undefined,
                                   });
                                   setArgsText(JSON.stringify(current.args || []));
                                   setEnvText(JSON.stringify(current.env || {}));
@@ -1034,6 +1177,16 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
                             Connect
                           </>
                         )}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={deleting === selectedServerId}
+                        onClick={() => selectedServerId && handleDeleteServer(selectedServerId)}
+                        className="border-2 border-red-300 hover:bg-red-600 text-red-700 hover:text-white"
+                      >
+                        {deleting === selectedServerId ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                        Delete
                       </Button>
                     </div>
                   </div>
@@ -1138,6 +1291,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
                       <Label>Environment (JSON object)</Label>
                       <Textarea value={envText} onChange={(e) => setEnvText(e.target.value)} />
                     </div>
+                    {editConfig?.url && <div className="sm:col-span-2"><AuthFields formData={editConfig} setFormData={setEditConfig as Dispatch<SetStateAction<MCPServerCreateRequest>>} userId={user?.uid || user?.user_id || ''} /></div>}
                     <div className="space-y-2">
                       <Label className="text-[#171717] font-medium">Timeout (ms)</Label>
                       <Input
@@ -1179,70 +1333,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
                   </div>
                 )}
 
-                {/* Connection Logs Section */}
-                <div className="mt-6 pt-6 border-t border-[#171717]/10">
-                  <button
-                    onClick={() => setConnectionLogsCollapsed(!connectionLogsCollapsed)}
-                    className="flex items-center gap-3 text-[#171717] hover:text-[#171717]/80 transition-colors group w-full text-left mb-3"
-                  >
-                    <MessageSquare className="h-5 w-5 text-[#171717]" />
-                    <div className="flex items-center gap-3 flex-1">
-                      <h3 className="font-semibold text-[#171717]">
-                        Connection Logs
-                        {connectionLogs.length > 0 && (
-                          <Badge variant="outline" className="border-[#171717] text-[#171717] bg-[#171717]/10 ml-2 rounded-xl">
-                            {connectionLogs.length}
-                          </Badge>
-                        )}
-                      </h3>
-                    </div>
-                    {connectionLogsCollapsed ? (
-                      <ChevronRight className="h-5 w-5 text-[#171717] group-hover:text-[#171717]/80 transition-colors" />
-                    ) : (
-                      <ChevronDown className="h-5 w-5 text-[#171717] group-hover:text-[#171717]/80 transition-colors" />
-                    )}
-                  </button>
-                  {!connectionLogsCollapsed && (
-                    <div className="mt-4">
-                      {connectionLogs.length === 0 ? (
-                        <div className="text-center py-8 rounded-2xl bg-[#fffeff] border-2 border-[#171717]/20">
-                          <MessageSquare className="h-10 w-10 mx-auto text-[#171717] mb-3" />
-                          <p className="text-[#171717] text-sm">No connection logs available. Click Connect to see connection process logs.</p>
-                        </div>
-                      ) : (
-                        <div className="rounded-2xl border-2 border-[#171717]/20 bg-[#fffeff] p-4 max-h-96 overflow-y-auto shadow-inner">
-                          <div className="space-y-2 font-mono text-xs">
-                            {connectionLogs.map((log, idx) => {
-                              const levelColor = {
-                                INFO: 'text-neutral-600',
-                                DEBUG: 'text-gray-600',
-                                WARNING: 'text-yellow-600',
-                                ERROR: 'text-red-600',
-                              }[log.level] || 'text-gray-600';
-
-                              const bgColor = {
-                                INFO: 'bg-neutral-500/10 border-neutral-500/30',
-                                DEBUG: 'bg-gray-500/10 border-gray-500/30',
-                                WARNING: 'bg-yellow-500/10 border-yellow-500/30',
-                                ERROR: 'bg-red-500/10 border-red-500/30',
-                              }[log.level] || 'bg-gray-500/10 border-gray-500/30';
-
-                              return (
-                                <div key={idx} className={`flex gap-3 py-2 px-3 rounded-xl border-2 ${bgColor} transition-all`}>
-                                  <span className="text-[#171717] shrink-0 text-[10px] pt-0.5">{log.timestamp}</span>
-                                  <span className={`shrink-0 font-semibold ${levelColor} min-w-15`}>
-                                    [{log.level}]
-                                  </span>
-                                  <span className="text-[#171717] flex-1 wrap-break-word leading-relaxed">{log.message}</span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
+                <ConnectionLogs logs={connectionLogs} collapsed={connectionLogsCollapsed} setCollapsed={setConnectionLogsCollapsed} />
               </CardContent>
             </Card>
 

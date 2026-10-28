@@ -8,7 +8,9 @@ import pytest
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 
-from src.agent.nodes.plan_dispatcher import dispatch_phase, phase_collector_node, plan_dispatcher_node
+from src.agent.nodes.execution_dispatcher import dispatch_execution, execution_dispatcher_node
+from src.agent.nodes.result_collector import branch_result, result_collector_node
+from src.agent.nodes.output_security_gate import output_security_gate_node
 from src.agent.plan import parse_plan
 
 
@@ -390,56 +392,60 @@ def test_parse_plan_rejects_fuzzy_resource_names():
 
 
 def test_parallel_phase_fanout_and_ordered_merge(monkeypatch):
-    from src.agent.nodes import plan_dispatcher as module
-
     barrier = threading.Barrier(2)
 
     def fake_armory(state, config=None):
         barrier.wait(timeout=2)
         time.sleep(0.02 if state["next_step"]["resource_name"] == "first" else 0)
-        return {"execution_history": [*state["execution_history"],
-                                      {"type": "armory", "resource_type": "tool", "result": state["next_step"]["resource_name"], "success": True}],
-                "messages": []}
+        return branch_result(state, {"action_id": state["next_step"]["action_id"], "source": "armory", "results": [{
+            "kind": "armory_result", "value": state["next_step"]["resource_name"], "success": True,
+            "name": state["next_step"]["resource_name"], "task": "run", "description": "run",
+            "metadata": {"resource_type": "tool", "arguments": {}},
+        }]})
 
     monkeypatch.setattr("src.agent.nodes.armory_node.armory_node", fake_armory)
     graph = StateGraph(PlanExecuteState)
-    graph.add_node("plan_dispatcher", plan_dispatcher_node)
-    graph.add_node("planned_step", module.planned_step_node)
-    graph.add_node("phase_collector", phase_collector_node)
-    graph.add_edge(START, "plan_dispatcher")
-    graph.add_conditional_edges("plan_dispatcher", dispatch_phase, ["planned_step"])
-    graph.add_edge("planned_step", "phase_collector")
-    graph.add_edge("phase_collector", END)
+    graph.add_node("execution_dispatcher", execution_dispatcher_node)
+    graph.add_node("armory_node", fake_armory)
+    graph.add_node("result_collector", result_collector_node)
+    graph.add_node("output_security_gate", output_security_gate_node)
+    graph.add_edge(START, "execution_dispatcher")
+    graph.add_conditional_edges("execution_dispatcher", dispatch_execution,
+                                {"armory_node": "armory_node", "agent_node": END})
+    graph.add_edge("armory_node", "result_collector")
+    graph.add_edge("result_collector", "output_security_gate")
+    graph.add_edge("output_security_gate", END)
     app = graph.compile()
     state = {"messages": [HumanMessage(content="hi")], "execution_history": [], "execution_memory": {},
              "context_memory": None, "planned_phase_index": 0,
              "planned_phases": [{"sequence": 1, "steps": [step("a", "first"), step("b", "second")]}]}
     result = app.invoke(state, {"recursion_limit": 20})
     assert [entry["result"] for entry in result["execution_history"]] == ["first", "second"]
-    assert list(result["execution_memory"]) == ["plan_a", "plan_b"]
-    assert result["plan_event"]["kind"] == "phase.finished"
+    assert [entry["step_id"] for entry in result["execution_history"]] == ["a", "b"]
 
 
 def test_dispatcher_runs_sequential_phases_without_reinvoking_agent(monkeypatch):
-    from src.agent.nodes import plan_dispatcher as module
-
     seen = []
 
     def fake_armory(state, config=None):
         seen.append(state["next_step"]["resource_name"])
-        return {"execution_history": [*state["execution_history"],
-                                      {"type": "armory", "resource_type": "tool", "result": seen[-1], "success": True}],
-                "messages": []}
+        return branch_result(state, {"action_id": state["next_step"]["action_id"], "source": "armory", "results": [{
+            "kind": "armory_result", "value": seen[-1], "success": True, "name": seen[-1],
+            "task": "run", "description": "run", "metadata": {"resource_type": "tool", "arguments": {}},
+        }]})
 
     monkeypatch.setattr("src.agent.nodes.armory_node.armory_node", fake_armory)
     graph = StateGraph(PlanExecuteState)
-    graph.add_node("plan_dispatcher", plan_dispatcher_node)
-    graph.add_node("planned_step", module.planned_step_node)
-    graph.add_node("phase_collector", phase_collector_node)
-    graph.add_edge(START, "plan_dispatcher")
-    graph.add_conditional_edges("plan_dispatcher", dispatch_phase, ["planned_step"])
-    graph.add_edge("planned_step", "phase_collector")
-    graph.add_conditional_edges("phase_collector", lambda state: END if not state.get("planned_phases") else "plan_dispatcher")
+    graph.add_node("execution_dispatcher", execution_dispatcher_node)
+    graph.add_node("armory_node", fake_armory)
+    graph.add_node("result_collector", result_collector_node)
+    graph.add_node("output_security_gate", output_security_gate_node)
+    graph.add_edge(START, "execution_dispatcher")
+    graph.add_conditional_edges("execution_dispatcher", dispatch_execution,
+                                {"armory_node": "armory_node", "agent_node": END})
+    graph.add_edge("armory_node", "result_collector")
+    graph.add_edge("result_collector", "output_security_gate")
+    graph.add_edge("output_security_gate", "execution_dispatcher")
     phases = [{"sequence": 1, "steps": [step("a", "first")]},
               {"sequence": 2, "steps": [step("b", "second", uses=["a"])]}]
     result = graph.compile().invoke({"messages": [], "execution_history": [], "execution_memory": {},
@@ -450,38 +456,39 @@ def test_dispatcher_runs_sequential_phases_without_reinvoking_agent(monkeypatch)
 
 
 def test_parallel_failure_replans_and_does_not_run_later_phase(monkeypatch):
-    from src.agent.nodes import plan_dispatcher as module
-
     seen = []
 
     def fake_armory(state, config=None):
         name = state["next_step"]["resource_name"]
         seen.append(name)
-        return {"execution_history": [*state["execution_history"],
-                                      {"type": "armory", "resource_type": "tool", "result": name, "success": name != "second"}],
-                "messages": []}
+        return branch_result(state, {"action_id": state["next_step"]["action_id"], "source": "armory", "results": [{
+            "kind": "armory_result", "value": name, "success": name != "second", "name": name,
+            "task": "run", "description": "run", "metadata": {"resource_type": "tool", "arguments": {}},
+        }]})
 
     monkeypatch.setattr("src.agent.nodes.armory_node.armory_node", fake_armory)
     graph = StateGraph(PlanExecuteState)
-    graph.add_node("plan_dispatcher", plan_dispatcher_node)
-    graph.add_node("planned_step", module.planned_step_node)
-    graph.add_node("phase_collector", phase_collector_node)
-    graph.add_edge(START, "plan_dispatcher")
-    graph.add_conditional_edges("plan_dispatcher", dispatch_phase, ["planned_step"])
-    graph.add_edge("planned_step", "phase_collector")
-    graph.add_conditional_edges("phase_collector", lambda state: END if not state.get("planned_phases") else "plan_dispatcher")
+    graph.add_node("execution_dispatcher", execution_dispatcher_node)
+    graph.add_node("armory_node", fake_armory)
+    graph.add_node("result_collector", result_collector_node)
+    graph.add_node("output_security_gate", output_security_gate_node)
+    graph.add_edge(START, "execution_dispatcher")
+    graph.add_conditional_edges("execution_dispatcher", dispatch_execution,
+                                {"armory_node": "armory_node", "agent_node": END})
+    graph.add_edge("armory_node", "result_collector")
+    graph.add_edge("result_collector", "output_security_gate")
+    graph.add_edge("output_security_gate", "execution_dispatcher")
     phases = [{"sequence": 1, "steps": [step("a", "first"), step("b", "second")]},
               {"sequence": 2, "steps": [step("c", "third")]}]
     result = graph.compile().invoke({"messages": [], "execution_history": [], "execution_memory": {},
                                      "context_memory": None, "planned_phase_index": 0, "planned_phases": phases})
     assert sorted(seen) == ["first", "second"]
-    assert result["plan_event"]["failed"] is True
+    assert any(event["kind"] == "plan.phase.finished" and event["payload"]["failed"]
+               for event in result["output_events"])
     assert result["planned_phases"] == []
 
 
 def test_finished_spawn_phase_marks_next_task_for_collection():
-    from src.agent.nodes.plan_dispatcher import phase_collector_node
-
     child_entry = {
         "type": "child_agent",
         "child_agent_id": "child-1",
@@ -499,20 +506,24 @@ def test_finished_spawn_phase_marks_next_task_for_collection():
         "uses": [],
         "child_calls": [{"task": "weather in Tokyo"}],
     }
-    out = phase_collector_node({
+    state = {
         "planned_phase_index": 0,
         "planned_phases": [{"sequence": 1, "steps": [step]}],
-        "phase_step_results": [{
+        "step_results": [{
             "id": "s1",
             "sequence": 1,
             "action": "child_agent",
             "task": "spawn weather",
             "name": "spawn",
-            "outcome": {"execution_history": [child_entry], "messages": []},
+            "results": [{"kind": "child_spawn", "value": {"status": "running"}, "success": True,
+                             "status": "running", "name": "child_agent", "task": "weather in Tokyo",
+                             "description": "weather in Tokyo", "metadata": {"child_agent_id": "child-1"}}],
         }],
         "execution_history": [],
         "execution_memory": {},
         "context_memory": None,
-    })
+    }
+    collected = result_collector_node(state)
+    out = output_security_gate_node({**state, **collected})
     assert out["current_task"] == "collect_child"
     assert out["execution_history"][0]["key"].endswith("child-1")

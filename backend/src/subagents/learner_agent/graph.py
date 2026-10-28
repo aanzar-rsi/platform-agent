@@ -62,6 +62,10 @@ def learn_session(agent_id: str, *, uid: str = "", checkpoint_id: str | None = N
                 "error": "",
                 "policy": {},
                 "extraction_request_id": "",
+                "extraction_requests": {},
+                "conversation_messages": [],
+                "decision_snapshots": [],
+                "allowed_chunk_types": [],
             }
         )
         out = {

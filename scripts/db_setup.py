@@ -165,6 +165,7 @@ SCHEMA_STATEMENTS: list[str] = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_mcp_catalog_owner ON mcp_servers_catalog (owner_user_id)",
+    "ALTER TABLE mcp_servers_catalog ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'",
     """
     CREATE TABLE IF NOT EXISTS user_mcp_connections (
         connection_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),

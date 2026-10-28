@@ -272,11 +272,13 @@ def fast_agent_prompt_loader(
     tools: list,
     subagents: list | None = None,
     conversation: str = "",
+    learned_experiences: str = "(none)",
 ) -> tuple[str, str]:
     context = {
         "persona": _load_module("persona"),
         "user_query": user_query,
         "conversation": conversation,
+        "learned_experiences": learned_experiences,
     }
     return load_prompt("fast_agent", context)
 
@@ -294,6 +296,7 @@ def planner_agent_prompt_loader(
     max_plan_steps: int = 8,
     child_mode: bool = False,
     planner_error: dict[str, Any] | None = None,
+    learned_experiences: str = "(none)",
 ) -> tuple[str, str]:
     context = {
         "persona": _load_module("persona"),
@@ -308,5 +311,6 @@ def planner_agent_prompt_loader(
         "max_plan_steps": max(1, int(max_plan_steps or 1)),
         "child_mode": child_mode,
         "planner_error": planner_error or {},
+        "learned_experiences": learned_experiences,
     }
     return load_prompt("planner_agent", context)

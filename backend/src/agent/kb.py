@@ -16,7 +16,7 @@ from psycopg.types.json import Jsonb
 from api.db.postgres import get_connection
 from src.config import settings
 from src.models.embeddings import embed_text
-from src.agent.policy_schema import memory_action_allowed
+from src.agent.policy_schema import memory_action_allowed, normalize_memory_policy
 from src.utils.trace import emit, in_run, span
 
 logger = logging.getLogger(__name__)
@@ -101,10 +101,11 @@ def _collection(scope: str):
 @contextmanager
 def _trace(action: str, scope: str, **data):
     if in_run():
-        with span("memory", action, component="kb", data={"scope": scope, **data}):
-            yield
+        trace_data = {"scope": scope, **data}
+        with span("memory", action, component="kb", data=trace_data):
+            yield trace_data
     else:
-        yield
+        yield data
 
 
 def _deny(action: str, scope: str, reason: str) -> None:
@@ -167,7 +168,9 @@ def _visible(row: dict | None, uid: str, policy: dict) -> bool:
     if row["expires_at"] and row["expires_at"] <= datetime.now(timezone.utc):
         return False
     scope = row["scope"]
-    if scope not in SCOPES or scope not in policy.get("read", []):
+    if scope not in SCOPES or not memory_action_allowed(
+        policy, action="read", scope=scope, chunk_type=row.get("chunk_type")
+    ):
         return False
     if scope == "USER":
         return str(row["owner_user_id"]) == uid
@@ -178,7 +181,12 @@ def _visible(row: dict | None, uid: str, policy: dict) -> bool:
 
 def _public(row: dict) -> dict:
     metadata = row["metadata"] or {}
-    safe_metadata = {key: metadata[key] for key in ("observed_tool", "prior_tool", "outcome") if key in metadata}
+    safe_metadata = {key: metadata[key] for key in (
+        "semantic_key", "evidence_kind", "decision_stage", "intent", "current_subgoal",
+        "resource_domain", "resource_type", "resource_name", "guidance_kind", "workflow_kind",
+        "failure_kind", "anti_pattern_kind", "preference_kind", "detail_kind", "preconditions",
+        "next_action", "retrieval_cues", "outcome",
+    ) if key in metadata}
     return {"chunk_id": row["chunk_id"], "chunk_type": row["chunk_type"], "scope": row["scope"],
             "memory_weight": row["memory_weight"], "status": row["status"],
             "active_version_id": row["version_id"], "content": row["content"],
@@ -193,6 +201,17 @@ def _conflicts(conn, scope: str, tenant: str | None, content: str) -> bool:
         ON c.active_version_id = v.version_id WHERE c.scope = %s AND c.tenant_id IS NOT DISTINCT FROM %s
         AND c.status = 'ACTIVE' AND v.status = 'ACTIVE' AND lower(v.content) = lower(%s)
         LIMIT 1""", (scope, tenant, negated)).fetchone())
+
+
+def _publication_allowed(policy: dict, *, chunk_type: str, target_scope: str) -> bool:
+    normalized = normalize_memory_policy(policy)
+    chunk = normalized.get("chunks", {}).get(chunk_type) or {}
+    return bool(
+        target_scope in normalized.get("publish", [])
+        and target_scope in normalized.get("promote", [])
+        and target_scope in chunk.get("promote", [])
+        and chunk.get("allow_admin_promotion", False)
+    )
 
 
 def _active_for_uid(conn, uid: str, source_id: str) -> dict | None:
@@ -272,7 +291,7 @@ def sync_index(limit: int = 100) -> int:
         return 0
     completed = 0
     with get_connection() as conn:
-        tasks = conn.execute("""SELECT o.version_id, o.operation, c.scope, c.owner_user_id, c.tenant_id,
+        tasks = conn.execute("""SELECT o.version_id, o.operation, c.scope, c.chunk_type, c.owner_user_id, c.tenant_id,
             c.active_version_id, c.status, v.search_text, v.embedding, v.embedding_model,
             v.embedding_dimensions, v.status AS version_status, v.expires_at, v.chunk_id
             FROM memory_index_outbox o JOIN memory_versions v ON v.version_id = o.version_id
@@ -288,7 +307,7 @@ def sync_index(limit: int = 100) -> int:
                 if task["embedding_model"] != _model() or task["embedding_dimensions"] != len(task["embedding"]):
                     raise ValueError("embedding_model_mismatch")
                 meta = {"chunk_id": task["chunk_id"], "scope": task["scope"], "status": "ACTIVE",
-                        "embedding_model": task["embedding_model"]}
+                        "embedding_model": task["embedding_model"], "chunk_type": task["chunk_type"]}
                 _compatible(collection, task["embedding"])
                 if task["scope"] == "USER":
                     meta["owner_user_id"] = str(task["owner_user_id"])
@@ -342,7 +361,8 @@ def rebuild_index() -> int:
     return sync_index(limit=100000)
 
 
-def search(uid: str, policy: dict, query: str, *, top_k: int = 5) -> list[dict]:
+def search(uid: str, policy: dict, query: str, *, top_k: int = 5,
+           chunk_types: set[str] | None = None) -> list[dict]:
     if not isinstance(uid, str) or not uid.strip():
         _deny("retrieve", "USER", "memory_identity_denied")
     try:
@@ -351,18 +371,31 @@ def search(uid: str, policy: dict, query: str, *, top_k: int = 5) -> list[dict]:
         _deny("retrieve", "USER", "memory_identity_denied")
     if not isinstance(query, str) or not query.strip() or top_k < 1 or top_k > 100:
         raise ValueError("invalid_memory_query")
+    allowed_types = {
+        chunk_type for chunk_type in (chunk_types or TYPES)
+        if chunk_type in TYPES and any(memory_action_allowed(policy, action="read", scope=scope,
+                                                               chunk_type=chunk_type)
+                                   for scope in SCOPES)
+    }
+    if not allowed_types:
+        return []
     scopes = [s for s in SCOPES if s in policy.get("read", []) and (s != "TENANT" or policy.get("tenant_id"))]
     if not scopes:
         return []
     if not _chroma_available():
         return []
-    with _trace("retrieve", ",".join(scopes), top_k=top_k,
-                query_hash=hashlib.sha256(query.encode()).hexdigest(), policy_version=policy.get("version")):
+    with _trace(
+        "retrieve", ",".join(scopes), top_k=top_k,
+        query_hash=hashlib.sha256(query.encode()).hexdigest(),
+        policy_version=policy.get("version"), scope_count=len(scopes), returned_count=0,
+    ) as trace_data:
         vector = _vector(query)
         candidates: list[tuple[str, float, str]] = []
         for scope in scopes:
-            where = {"owner_user_id": uid} if scope == "USER" else (
-                {"tenant_id": policy["tenant_id"]} if scope == "TENANT" else None)
+            filters = ([{"owner_user_id": uid}] if scope == "USER" else
+                       [{"tenant_id": policy["tenant_id"]}] if scope == "TENANT" else [])
+            filters.append({"chunk_type": {"$in": sorted(allowed_types)}})
+            where = filters[0] if len(filters) == 1 else {"$and": filters}
             collection = _collection(scope)
             _compatible(collection, vector)
             result = collection.query(query_embeddings=[vector], n_results=top_k,
@@ -378,13 +411,63 @@ def search(uid: str, policy: dict, query: str, *, top_k: int = 5) -> list[dict]:
                     WHERE v.version_id = %s AND c.active_version_id = v.version_id""", (version_id,)).fetchone()
                 if not _visible(row, uid, policy) or row["scope"] != scope or row["version_id"] != version_id:
                     continue
+                if row["chunk_type"] not in allowed_types:
+                    continue
                 hit = _public(row)
                 age = max(0, (datetime.now(timezone.utc) - row["updated_at"]).days)
                 hit["score"] = similarity + {"USER": 0.15, "TENANT": 0.08, "AGENT": 0}[scope] + (
                     0.1 / (1 + age / 30)) + row["memory_weight"] * 0.1
                 hits.append(hit)
         hits.sort(key=lambda x: x["score"], reverse=True)
-        return hits[:top_k]
+        selected = hits[:top_k]
+        trace_data["returned_count"] = len(selected)
+        return selected
+
+
+def find_user_memory(uid: str, policy: dict, *, chunk_type: str,
+                     semantic_key: str) -> dict | None:
+    """Find one authorized active USER chunk by its normalized semantic key."""
+    _authorized(uid, policy, "USER", "read", chunk_type=chunk_type)
+    with get_connection() as conn:
+        row = conn.execute("""SELECT c.*, v.version_id, v.content, v.metadata,
+            v.status AS version_status, v.expires_at FROM memory_chunks c JOIN memory_versions v
+            ON c.active_version_id = v.version_id WHERE c.scope = 'USER' AND c.owner_user_id = %s
+            AND c.chunk_type = %s AND c.status = 'ACTIVE' AND v.status = 'ACTIVE'
+            AND v.metadata->>'semantic_key' = %s ORDER BY c.updated_at DESC LIMIT 1""",
+            (uid, chunk_type, semantic_key)).fetchone()
+    return _public(row) if row and _visible(row, uid, policy) else None
+
+
+def evidence_exists(uid: str, policy: dict, evidence_id: str) -> bool:
+    """Check append-only version provenance so branch retries are idempotent."""
+    _authorized(uid, policy, "USER", "read")
+    with get_connection() as conn:
+        return bool(conn.execute("""SELECT 1 FROM memory_versions v JOIN memory_chunks c
+            ON c.chunk_id = v.chunk_id WHERE c.owner_user_id = %s
+            AND v.metadata->>'evidence_id' = %s
+            UNION ALL
+            SELECT 1 FROM memory_audit WHERE actor_user_id = %s
+            AND details->>'evidence_id' = %s LIMIT 1""",
+            (uid, evidence_id, uid, evidence_id)).fetchone())
+
+
+def reinforce(uid: str, policy: dict, chunk_id: str, *, amount: float = 0.05,
+              evidence_id: str | None = None) -> dict:
+    """Increase confidence without creating a duplicate content version."""
+    _authorized(uid, policy, "USER", "write")
+    with get_connection() as conn, conn.transaction():
+        row = _row(conn, chunk_id, lock=True)
+        if not row or not _visible(row, uid, {**policy, "read": list(set(policy.get("read", [])) | {"USER"})}):
+            _deny("write", "USER", "memory_scope_denied")
+        weight = min(1.0, float(row["memory_weight"]) + max(0.0, amount))
+        conn.execute("UPDATE memory_chunks SET memory_weight = %s, updated_at = now() WHERE chunk_id = %s",
+                     (weight, chunk_id))
+        details = {"memory_weight": weight}
+        if evidence_id:
+            details["evidence_id"] = evidence_id
+        _audit(conn, "memory.reinforce", uid, chunk_id, row["version_id"], details=details)
+        result = _public(_row(conn, chunk_id))
+    return result
 
 
 def list_chunks(uid: str, policy: dict, *, limit: int = 100, scope: str | None = None) -> list[dict]:
@@ -461,8 +544,6 @@ def request_promotion(uid: str, policy: dict, source_chunk_id: str, target_scope
     _uuid(uid)
     if target_scope not in {"TENANT", "AGENT"} or not idempotency_key or len(idempotency_key) > 160:
         raise ValueError("invalid_promotion_request")
-    if not memory_action_allowed(policy, action="promote", scope="USER", chunk_type=None, promote_target=target_scope):
-        raise PermissionError("promotion_policy_denied")
     with get_connection() as conn, conn.transaction():
         existing = conn.execute("""SELECT * FROM memory_promotion_requests WHERE requested_by = %s
             AND idempotency_key = %s""", (uid, idempotency_key)).fetchone()
@@ -474,6 +555,11 @@ def request_promotion(uid: str, policy: dict, source_chunk_id: str, target_scope
         row = _row(conn, source_chunk_id, lock=True)
         if not row or not _visible(row, uid, policy):
             raise PermissionError("memory_scope_denied")
+        if not memory_action_allowed(
+            policy, action="promote", scope=row["scope"], chunk_type=row["chunk_type"],
+            promote_target=target_scope,
+        ):
+            raise PermissionError("promotion_policy_denied")
         if (row["scope"], target_scope) not in {("USER", "TENANT"), ("USER", "AGENT"), ("TENANT", "AGENT")}:
             raise ValueError("invalid_promotion_transition")
         if target_scope == "TENANT" and (not policy.get("tenant_id") or "TENANT" not in policy.get("read", [])):
@@ -492,7 +578,7 @@ def request_promotion(uid: str, policy: dict, source_chunk_id: str, target_scope
             (request_id, idempotency_key, uid, source_chunk_id, row["version_id"], row["scope"],
              target_scope, tenant, content)).fetchone()
         _audit(conn, "memory.promotion.requested", uid, source_chunk_id, row["version_id"], request_id)
-    _governance_trace("memory.promotion.requested", uid, request)
+    _governance_trace("memory.promotion.requested", uid, {**request, "policy_version": policy.get("version")})
     return _request_view(request)
 
 
@@ -551,8 +637,31 @@ def _governance_trace(event: str, uid: str, request: dict | None = None, *, stat
              }.items() if value is not None})
 
 
-_PRIVATE = re.compile(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|https?://\S+|\b(?:\d{1,3}\.){3}\d{1,3}\b|"
-                      r"\b(?:api[_-]?key|password|token|secret|credential)\s*[:=]\s*\S+", re.I)
+_PRIVATE = re.compile(
+    r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|https?://\S+|\b(?:\d{1,3}\.){3}\d{1,3}\b|"
+    r"\b(?:api[_-]?key|password|token|secret|credential)\s*[:=]\s*\S+|"
+    r"\b(?:customer|client|tenant|account|organization)[_-]?(?:id|name|code)\s*[:=]\s*\S+|"
+    r"\b(?:host|hostname|server|database|schema)\s*[:=]\s*[\w.-]+",
+    re.I,
+)
+
+
+def _fail_promotion(uid: str, request_id: str, reason: str) -> None:
+    """Record a terminal review failure without altering the source memory."""
+    with get_connection() as conn, conn.transaction():
+        request = conn.execute(
+            "SELECT * FROM memory_promotion_requests WHERE request_id = %s FOR UPDATE", (request_id,)
+        ).fetchone()
+        if not request or request["state"] != "APPROVAL_PENDING":
+            return
+        failed = conn.execute("""UPDATE memory_promotion_requests SET state = 'PROMOTION_FAILED',
+            reviewed_by = %s, reason = %s, updated_at = now() WHERE request_id = %s RETURNING *""",
+            (uid, reason[:500], request_id)).fetchone()
+        request = failed or {**request, "state": "PROMOTION_FAILED", "reviewed_by": uid,
+                             "reason": reason[:500]}
+        _audit(conn, "memory.promotion.failed", uid, request["source_chunk_id"],
+               request["source_version_id"], request_id, {"reason_code": reason[:120]})
+    _governance_trace("memory.promotion.failed", uid, request, status="error")
 
 
 def review_promotion(uid: str, role: str, request_id: str, *, approve: bool,
@@ -561,9 +670,19 @@ def review_promotion(uid: str, role: str, request_id: str, *, approve: bool,
         raise PermissionError("admin_required")
     try:
         return _review_promotion(uid, request_id, approve=approve, policy=policy, reason=reason)
-    except (PermissionError, ValueError, KeyError):
+    except (PermissionError, ValueError, KeyError) as exc:
+        if approve:
+            try:
+                _fail_promotion(uid, request_id, str(exc))
+            except Exception:
+                logger.warning("failed recording terminal promotion failure request=%s", request_id, exc_info=True)
         raise
-    except Exception:
+    except Exception as exc:
+        if approve:
+            try:
+                _fail_promotion(uid, request_id, type(exc).__name__)
+            except Exception:
+                logger.warning("failed recording terminal promotion failure request=%s", request_id, exc_info=True)
         _governance_trace("memory.promotion.failed", uid, {"request_id": request_id}, status="error")
         raise
 
@@ -588,7 +707,9 @@ def _review_promotion(uid: str, request_id: str, *, approve: bool, policy: dict,
                     source["version_id"] != request["source_version_id"] or
                     (source["expires_at"] and source["expires_at"] <= datetime.now(timezone.utc))):
                 raise ValueError("source_stale")
-            if not memory_action_allowed(policy, action="promote", scope="USER", promote_target=request["to_scope"]):
+            if not _publication_allowed(
+                policy, chunk_type=source["chunk_type"], target_scope=request["to_scope"]
+            ):
                 raise PermissionError("publisher_policy_denied")
             tenant = _authorized(uid, policy, request["to_scope"], "write", role="admin")
             if request["to_scope"] == "TENANT" and tenant != request["target_tenant_id"]:
@@ -704,11 +825,14 @@ def import_legacy(uid: str, policy: dict, *, dry_run: bool = False) -> dict[str,
     return counts
 
 
-def set_expiry(uid: str, role: str, chunk_id: str, policy: dict, expires_at: datetime | None) -> dict:
+def set_expiry(uid: str, role: str, chunk_id: str, policy: dict, expires_at: datetime | None,
+               retention_class: str | None = None) -> dict:
     if role != "admin":
         raise PermissionError("admin_required")
     if expires_at is not None and expires_at.tzinfo is None:
         raise ValueError("expiry_requires_timezone")
+    if retention_class not in {None, "TRANSIENT", "STANDARD", "LONG_TERM", "LEGAL_HOLD"}:
+        raise ValueError("invalid_retention_class")
     with get_connection() as conn, conn.transaction():
         row = _row(conn, chunk_id, lock=True)
         if not row or row["scope"] not in {"TENANT", "AGENT"}:
@@ -716,11 +840,13 @@ def set_expiry(uid: str, role: str, chunk_id: str, policy: dict, expires_at: dat
         _authorized(uid, policy, row["scope"], "write", role=role)
         if row["scope"] == "TENANT" and row["tenant_id"] != policy.get("tenant_id"):
             raise PermissionError("tenant_scope_denied")
-        conn.execute("UPDATE memory_versions SET expires_at = %s, revalidated_at = now() WHERE version_id = %s",
-                     (expires_at, row["version_id"]))
+        conn.execute("""UPDATE memory_versions SET expires_at = %s, retention_class = %s,
+            revalidated_at = now() WHERE version_id = %s""",
+            (expires_at, retention_class, row["version_id"]))
         if row["status"] == "ACTIVE" and row["version_status"] == "ACTIVE":
             _queue(conn, row["version_id"], "UPSERT" if expires_at is None or expires_at > datetime.now(timezone.utc) else "DELETE")
-        _audit(conn, "memory.revalidate", uid, chunk_id, row["version_id"], details={"has_expiry": bool(expires_at)})
+        _audit(conn, "memory.revalidate", uid, chunk_id, row["version_id"],
+               details={"has_expiry": bool(expires_at), "retention_class": retention_class})
     _governance_trace("memory.revalidate", uid)
     sync_index()
-    return {"chunk_id": chunk_id, "expires_at": _iso(expires_at)}
+    return {"chunk_id": chunk_id, "expires_at": _iso(expires_at), "retention_class": retention_class}

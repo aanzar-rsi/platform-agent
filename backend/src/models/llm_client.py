@@ -168,9 +168,47 @@ class BaseLLMProvider:
 class LiteLLMProvider(BaseLLMProvider):
     name = "litellm"
 
+    @staticmethod
+    def _is_temperature_unsupported(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "temperature" in msg and (
+            "unsupported value" in msg
+            or "does not support" in msg
+            or "only the default (1)" in msg
+        )
+
+    def _create_with_temperature_fallback(
+        self,
+        create,
+        *,
+        model_id: str,
+        temperature: float,
+        messages: list[dict],
+        **extra_kwargs: Any,
+    ):
+        kwargs: Dict[str, Any] = {
+            "model": model_id,
+            "temperature": temperature,
+            "messages": messages,
+            **extra_kwargs,
+        }
+        try:
+            return create(**kwargs)
+        except Exception as exc:
+            if not self._is_temperature_unsupported(exc):
+                raise
+            logger.info(
+                "Model %s rejected temperature=%s; retrying with provider default temperature",
+                model_id,
+                temperature,
+            )
+            kwargs.pop("temperature", None)
+            return create(**kwargs)
+
     def complete(self, *, model_id: str, temperature: float, messages: list[dict]) -> ProviderSyncResult:
-        raw = _gateway_client().chat.completions.with_raw_response.create(
-            model=model_id,
+        raw = self._create_with_temperature_fallback(
+            _gateway_client().chat.completions.with_raw_response.create,
+            model_id=model_id,
             temperature=temperature,
             messages=messages,
         )
@@ -189,8 +227,9 @@ class LiteLLMProvider(BaseLLMProvider):
     def open_stream(self, *, model_id: str, temperature: float, messages: list[dict]) -> ProviderStreamResult:
         create = _gateway_client().chat.completions.with_raw_response.create
         try:
-            raw = create(
-                model=model_id,
+            raw = self._create_with_temperature_fallback(
+                create,
+                model_id=model_id,
                 temperature=temperature,
                 messages=messages,
                 stream=True,
@@ -199,8 +238,9 @@ class LiteLLMProvider(BaseLLMProvider):
         except Exception as exc:
             if "stream_options" not in str(exc):
                 raise
-            raw = create(
-                model=model_id,
+            raw = self._create_with_temperature_fallback(
+                create,
+                model_id=model_id,
                 temperature=temperature,
                 messages=messages,
                 stream=True,
@@ -314,6 +354,26 @@ def _emit_cache_hit_event(
         pass
 
 
+def _emit_lifecycle(event: str, *, call_id: str, mode: str, model_id: str,
+                    output_type: Optional[str] = None, **extra: Any) -> None:
+    try:
+        from src.agent.token_stream import emit_lifecycle
+        from src.utils.trace import current_ids
+
+        source = {key: value for key, value in current_ids().items()
+                  if key in {"agent_id", "child_agent_id", "execution_id"} and value}
+        emit_lifecycle(event, {
+            "call_id": call_id,
+            "mode": mode,
+            "model_id": model_id,
+            "output_type": output_type,
+            **source,
+            **extra,
+        })
+    except Exception:
+        pass
+
+
 def _cache_key(
     *, model_id: str, system_prompt: Optional[str], prompt: str, output_type: Optional[str], temperature: float
 ) -> str:
@@ -360,6 +420,7 @@ def _replay(
     prompt: str,
     output_type: Optional[str],
     temperature: float,
+    call_id: str,
 ) -> Optional[str]:
     if not settings.mock_llm_call or not cache_key:
         return None
@@ -426,7 +487,7 @@ def _replay(
     )
 
     _record(
-        call_id=_new_call_id(),
+        call_id=call_id,
         mode=mode,
         model_id=model_id,
         output_type=output_type,
@@ -477,6 +538,7 @@ class LLMClient:
         temperature: float = 0.7,
     ) -> Union[str, Dict[str, Any]]:
         model = model_id or self.default_model
+        call_id = _new_call_id()
         effective_system_prompt = _apply_output_type_instruction(system_prompt, output_type)
 
         cache_key = _cache_key(
@@ -495,24 +557,29 @@ class LLMClient:
             mode="sync",
             output_type=output_type,
         )
+        _emit_lifecycle("llm.started", call_id=call_id, mode="sync", model_id=model,
+                        output_type=output_type)
 
-        replayed = _replay(
-            cache_key=cache_key,
-            mode="sync",
-            model_id=model,
-            system_prompt=effective_system_prompt,
-            prompt=prompt,
-            output_type=output_type,
-            temperature=temperature,
-        )
-        if replayed is not None:
-            return _parse_json_response(replayed) if output_type == "json" else replayed
-
-        messages = _build_messages(prompt, effective_system_prompt)
-        call_id = _new_call_id()
         started = time.monotonic()
 
         try:
+            replayed = _replay(
+                cache_key=cache_key,
+                mode="sync",
+                model_id=model,
+                system_prompt=effective_system_prompt,
+                prompt=prompt,
+                output_type=output_type,
+                temperature=temperature,
+                call_id=call_id,
+            )
+            if replayed is not None:
+                parsed = _parse_json_response(replayed) if output_type == "json" else replayed
+                _emit_lifecycle("llm.done", call_id=call_id, mode="sync", model_id=model,
+                                output_type=output_type, cached=True, latency_ms=0)
+                return parsed
+
+            messages = _build_messages(prompt, effective_system_prompt)
             result = self.provider.complete(model_id=model, temperature=temperature, messages=messages)
             latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -564,6 +631,8 @@ class LLMClient:
                     "provider": self.provider.name,
                 },
             )
+            _emit_lifecycle("llm.done", call_id=call_id, mode="sync", model_id=model,
+                            output_type=output_type, latency_ms=latency_ms)
             return parsed
         except Exception as exc:
             _record(
@@ -585,6 +654,9 @@ class LLMClient:
                 log_event("llm.error", mode="sync", model_id=model, message=str(exc), call_id=call_id)
             except Exception:
                 pass
+            _emit_lifecycle("llm.error", call_id=call_id, mode="sync", model_id=model,
+                            output_type=output_type, message=str(exc),
+                            latency_ms=int((time.monotonic() - started) * 1000))
             raise
 
     def stream(
@@ -595,6 +667,7 @@ class LLMClient:
         temperature: float = 0.7,
     ) -> Generator[str, None, None]:
         model = model_id or self.default_model
+        call_id = _new_call_id()
         cache_key = _cache_key(
             model_id=model,
             system_prompt=system_prompt,
@@ -610,27 +683,30 @@ class LLMClient:
             temperature=temperature,
             mode="stream",
         )
+        _emit_lifecycle("llm.started", call_id=call_id, mode="stream", model_id=model)
 
-        replayed = _replay(
-            cache_key=cache_key,
-            mode="stream",
-            model_id=model,
-            system_prompt=system_prompt,
-            prompt=prompt,
-            output_type=None,
-            temperature=temperature,
-        )
-        if replayed is not None:
-            yield from _replay_chunks(replayed)
-            return
-
-        messages = _build_messages(prompt, system_prompt)
-        call_id = _new_call_id()
         started = time.monotonic()
 
         buffer_parts: list[str] = []
         stream_usage: Optional[Dict[str, Any]] = None
         try:
+            replayed = _replay(
+                cache_key=cache_key,
+                mode="stream",
+                model_id=model,
+                system_prompt=system_prompt,
+                prompt=prompt,
+                output_type=None,
+                temperature=temperature,
+                call_id=call_id,
+            )
+            if replayed is not None:
+                yield from _replay_chunks(replayed)
+                _emit_lifecycle("llm.done", call_id=call_id, mode="stream", model_id=model,
+                                cached=True, latency_ms=0)
+                return
+
+            messages = _build_messages(prompt, system_prompt)
             opened = self.provider.open_stream(model_id=model, temperature=temperature, messages=messages)
             headers = opened.response_headers
             for chunk in opened.stream:
@@ -702,6 +778,8 @@ class LLMClient:
                     "provider": self.provider.name,
                 },
             )
+            _emit_lifecycle("llm.done", call_id=call_id, mode="stream", model_id=model,
+                            latency_ms=latency_ms)
         except Exception as exc:
             partial = "".join(buffer_parts)
             _record(
@@ -731,6 +809,9 @@ class LLMClient:
                 )
             except Exception:
                 pass
+            _emit_lifecycle("llm.error", call_id=call_id, mode="stream", model_id=model,
+                            message=str(exc), partial_response=partial,
+                            latency_ms=int((time.monotonic() - started) * 1000))
             raise
 
 

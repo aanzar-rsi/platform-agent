@@ -271,13 +271,14 @@ describe("EnhancedChatView", () => {
       wsHandlers.onRunStarted?.({ execution_id: "r1", query: "Next?" });
       wsHandlers.onLlmToken?.({ text: "Rea", channel: "reasoning" });
       wsHandlers.onLlmToken?.({ text: "Ans", channel: "output" });
-      wsHandlers.onToolStarted?.({ tool_name: "clock", tool_args: {} });
-      wsHandlers.onToolFinished?.({ tool_name: "clock", result: "12:00", success: true });
+      wsHandlers.onToolStarted?.({ action_id: "clock-call-1", tool_name: "clock", tool_args: {} });
+      wsHandlers.onToolFinished?.({ action_id: "clock-call-1", tool_name: "clock", result: "12:00", success: true });
     });
 
     expect(await screen.findByText(/Ans/)).toBeInTheDocument();
     expect(screen.getByText("Rea")).toBeInTheDocument();
     expect(screen.getByText("clock")).toBeInTheDocument();
+    expect(screen.getByText("clock-call-1")).toBeInTheDocument();
     expect(screen.queryByText(/Agent activity/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/^Reasoning$/i)).not.toBeInTheDocument();
 
@@ -289,7 +290,12 @@ describe("EnhancedChatView", () => {
           { role: "user", content: "Hello" },
           { role: "assistant", content: "Hi there", checkpoint_id: "cp_tip" },
           { role: "user", content: "Next?" },
-          { role: "assistant", content: "Ans", checkpoint_id: "cp_new" },
+          {
+            role: "assistant",
+            content: "Ans",
+            checkpoint_id: "cp_new",
+            metadata: { steps: [{ type: "tool", tool: { id: "clock-call-1", name: "clock", result: "12:00", success: true } }] },
+          },
         ],
         rollback_checkpoint_id: null,
       },
@@ -305,6 +311,37 @@ describe("EnhancedChatView", () => {
     });
 
     await waitFor(() => expect(getMock.mock.calls.length).toBeGreaterThan(1));
+    expect(screen.getByText("clock")).toBeInTheDocument();
+    expect(screen.getByText("clock-call-1")).toBeInTheDocument();
+  });
+
+  it("keeps thinking at the bottom for every sequential LLM call", async () => {
+    render(
+      <MemoryRouter>
+        <EnhancedChatView sessionId="chat_1" />
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(connectMock).toHaveBeenCalled());
+
+    await act(async () => {
+      wsHandlers.onSessionReady?.({ last_seq: 0, run_active: true, backlog_count: 0, epoch: 1 });
+      wsHandlers.onRunStarted?.({ execution_id: "r-llm", query: "work" });
+      wsHandlers.onLlmStarted?.({ call_id: "call-1" });
+      wsHandlers.onLlmToken?.({ text: "First reason", channel: "reasoning" });
+    });
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+
+    await act(async () => {
+      wsHandlers.onLlmDone?.({ call_id: "call-1" });
+    });
+    expect(screen.queryByText("Thinking…")).not.toBeInTheDocument();
+
+    await act(async () => {
+      wsHandlers.onToolStarted?.({ action_id: "tool-1", tool_name: "clock", tool_args: { zone: "UTC" } });
+      wsHandlers.onLlmStarted?.({ call_id: "call-2" });
+    });
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    expect(screen.getByText("clock")).toBeInTheDocument();
   });
 
   it("keeps child reasoning scoped to the matching child card", async () => {
@@ -339,10 +376,11 @@ describe("EnhancedChatView", () => {
     });
 
     expect(screen.queryByText("Thinking…")).not.toBeInTheDocument();
-    expect(screen.getAllByText("Investigate child marker").length).toBeGreaterThan(0);
+    expect(screen.getByText("Investigate child marker")).toBeInTheDocument();
     expect(screen.getByText("child-1")).toBeInTheDocument();
-
+    expect(screen.queryByText("child-only-reasoning")).not.toBeInTheDocument();
     await user.click(screen.getByTitle("Show child details"));
+    expect(screen.getByText("child-only-reasoning")).toBeInTheDocument();
   });
 
   it("ignores run.completed for a different execution id while parent run is active", async () => {

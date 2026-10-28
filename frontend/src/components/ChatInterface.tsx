@@ -132,6 +132,7 @@ export default function ChatInterface() {
                   <div className="flex h-full flex-col">
                     <ChatRightSidebar
                       agentId={activeSessionId}
+                      isExecuting={Boolean(activeSessionId && executingSessionIds.includes(activeSessionId))}
                       activeTab={activeRightTab}
                       onTabChange={setActiveRightTab}
                       onClose={() => setIsRightSidebarOpen(false)}

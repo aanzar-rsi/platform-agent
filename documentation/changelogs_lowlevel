@@ -1,0 +1,63 @@
+# Low-Level Changelog
+
+- 2026-10-27T16:46:03+00:00 — Set `ChildRunner` default timeout to 600 seconds (`backend/src/agent/child_runner.py`) and changed timed-out `await_child` waits to raise `TimeoutError("child_still_running")` without forcing child failure. Updated `backend/src/agent/nodes/collect_child.py` to emit a sanitized `child_collection` envelope with `status="running"` and `value="child_still_running"` on timeout so output-security preserves live-child state instead of marking failure. Added regression coverage in `backend/tests/test_output_security_gate.py::test_collect_child_timeout_keeps_child_running_and_requeues`; verified with `backend/.venv/bin/python -m pytest tests/test_output_security_gate.py tests/test_phased_plan.py tests/test_context_memory.py tests/test_child_streaming_runtime.py tests/test_agent_core.py -q` (107 passed).
+
+- 2026-10-27T09:09:58+00:00 — Replaced `kb.rebuild_index()` in `backend/api/lifespan.py` with post-readiness bounded `kb.sync_index()` outbox draining followed by periodic `kb.refresh_index()`; logged database, schema, graph, and total startup timings. Added retry/drain tests in `backend/tests/test_startup.py` and unignored that test in `.gitignore`. Measured the previous full rebuild at 29.5s for 68 rows; the remaining cold-start cost is predominantly Python imports from the OneDrive-mounted workspace.
+
+- 2026-10-27T07:30:00+00:00 — Replaced the separate dark policy-preset button in `ChatSidebar` with a yellow split-button affordance and added form controls for tool confirmation, memory enablement, extraction confirmation, admin promotion, and read/write/promote scopes while preserving JSON mode.
+
+- 2026-10-27T06:30:00+00:00 — Removed the 420px two-column Armory card grids in `ChatRightSidebar`, constrained server-card overflow, kept action controls inside their card, loaded connected-server details, and rendered discovered MCP tools/resources with wide-panel-only inner grids.
+
+- 2026-10-27T00:00:00+00:00 — Added responsive policy/tool/subagent/server grids, omitted empty policy groups, introduced a shared Armory details dialog with credential redaction, passed active execution state into `ChatRightSidebar` for two-second analytics polling plus final refresh, and labeled UUID-shaped zero-cost LLM model buckets as cache activity with focused regression coverage.
+
+- 2026-10-27T06:23:13+00:00 — Added dedicated `GraphRecursionError` handling in `AgentRuntime.run_turn` with a warning log, sanitized limit-aware `run.error` message, preserved failed execution state, and focused regression coverage.
+
+- 2026-10-27T06:26:04+00:00 — Updated `ChatRightSidebar` with a readable two-column Armory switcher, section guidance and empty states, wrap-safe resource metadata, searchable memory entries, expandable extraction and memory cards, and GFM-formatted long-form content.
+
+- 2026-10-26T11:40:00+00:00 — Changed MCP resource alias expansion in `extract_chunks_node` to build aliases before merging them into `observed_resources`, preventing set-size mutation errors; added focused extraction-node regression coverage.
+
+- 2026-10-26T16:20:00+00:00 — Added persisted resource-name fallback and always-visible call IDs in `EnhancedChatView`; rebuilt `ChatRightSidebar` usage cards with human-readable headings, wrapping, shrink-safe layouts, and scrollbar padding; added a live-to-persisted resource widget regression assertion.
+
+- 2026-10-26T11:10:00+00:00 — Added `use_agent_credentials` MCP auth metadata, server-side current-user ID enforcement, default login URL derivation, conditional username input, immediate create-state reconciliation, and cancellation-safe stale transport shutdown with focused tests.
+
+- 2026-10-26T09:40:00+00:00 — Changed MCP resource-alias expansion in `agent_node` to iterate the stable Armory resource list instead of mutating and iterating the same set; added a focused regression test.
+
+- 2026-10-26T14:15:00+00:00 — Extracted the MCP Connection Logs renderer for form/details reuse, added a focused MCP error normalizer for FastAPI string and validation-array details, wired create/update/connect failures into logs, and added regression tests.
+
+- 2026-10-26T08:30:00+00:00 — Reworked `AuthFields` in `frontend/src/pages/MCPConfig.tsx` with labeled, accessible inputs, helper text, autocomplete hints, defaults, and password-replacement guidance.
+
+- 2026-10-26T12:00:00+00:00 — Added `requirements/09_LEARNER_MEMORY_EXECUTION_PLAN.md` with the canonical seven-type taxonomy, evidence and semantic identities, decision snapshots, per-type extraction governance, retrieval lanes, KB/prompt changes, Phase 1/2 compliance work, tests, documentation, and graph generation order.
+- 2026-10-26T13:30:00+00:00 — Added unified validated memory extraction, per-type confirmation handling, semantic-key consolidation/evidence idempotence, type-aware KB search, decision-stage retrieval lanes, resource availability filtering, fast/planner prompt injection, child spawn metadata preservation, retryable pending leaves, focused tests, and learner-owned documentation.
+- 2026-10-26T15:00:00+00:00 — Enforced promotion target and chunk-type policy at request/review time, required publish permission and `allow_admin_promotion`, expanded AGENT privacy patterns, persisted `PROMOTION_FAILED` terminals without changing sources, added validated retention classes, and included returned/scope counts in memory retrieval traces.
+
+- 2026-10-26T08:20:00+00:00 — Added encrypted MCP login credential/token handling, configurable JSON login fields, bearer auth for HTTP/SSE transports, safe public serialization, frontend configuration fields, and deletion buttons; added focused MCP credential regression coverage.
+
+- 2026-10-22T06:50:40+00:00 — Created `/docuemtation/changelogs_highlevel` and `/docuemtation/changelogs_lowleve`.
+- 2026-10-22T06:50:40+00:00 — Updated root `AGENTS.md` with a new "Changelog Maintenance" section that requires agents to append timestamped entries to both changelog files for every codebase change.
+- 2026-10-22T07:08:27+00:00 — Added canonical executor envelopes, stable action IDs, output routing fields, pending context-selection state, deterministic credential/control-character sanitization, source-specific output validation, idempotent history upserts, and gate-owned memory/message/event commits.
+- 2026-10-22T07:08:27+00:00 — Simplified armory, child spawn, child collection, and human-input nodes to return pre-sanitized envelopes without mutating execution history, execution memory, or context memory.
+- 2026-10-22T07:08:27+00:00 — Reduced phase collection to ordered fan-in and moved planned result persistence, failure handling, plan advancement, and completion events into `output_security_gate`.
+- 2026-10-22T07:08:27+00:00 — Updated graph, runtime, CLI, checkpoint defaults, and focused tests for the centralized output flow and direct context-selector routing.
+- 2026-10-22T07:08:27+00:00 — Added a narrow `.gitignore` exception so `backend/tests/test_output_security_gate.py` is tracked despite the repository's broad `tests/` ignore rule.
+- 2026-10-22T09:31:35+00:00 — Replaced `plan_dispatcher`, `planned_step`, and `phase_collector` with `execution_dispatcher` and `result_collector`; executor graph nodes now fan out via LangGraph `Send` and return reducer-backed step results.
+- 2026-10-22T09:31:35+00:00 — Normalized validated direct actions and precomputed pause output into single-step dispatch batches, and removed obsolete input/output/collector routing functions and `output_route` state.
+- 2026-10-22T09:31:35+00:00 — Updated checkpoint defaults, runtime/CLI phase events, executor adapters, context continuation, and direct/planned parity tests for the unified pipeline.
+- 2026-10-22T09:31:35+00:00 — Added graph-shape tests asserting fixed single-edge boundaries, shared collector ingress for all new-data producers, and removal of legacy execution nodes.
+- 2026-10-22T07:20:29+00:00 — Added `backend/src/agent/nodes/planned_step.py` and moved `planned_step_node` out of `plan_dispatcher.py` with unchanged logic.
+- 2026-10-22T07:20:29+00:00 — Added `backend/src/agent/nodes/phase_collector.py` and moved `phase_collector_node` out of `plan_dispatcher.py` with unchanged logic.
+- 2026-10-22T07:20:29+00:00 — Updated `backend/src/agent/graph.py` imports to load `planned_step_node` and `phase_collector_node` from their own files.
+- 2026-10-22T07:20:29+00:00 — Updated `backend/tests/test_phased_plan.py` imports/references to the new per-node modules.
+- 2026-10-22T07:20:29+00:00 — Verified with `backend/.venv/bin/python -m pytest backend/tests/test_phased_plan.py -q` (23 passed).
+- 2026-10-22T10:04:02+00:00 — Removed unused `sys`/`Path` and `sys.path.insert(...)` bootstrap from `backend/src/agent/graph.py` (not needed by current import/runtime path setup).
+- 2026-10-22T10:04:02+00:00 — Removed unused alias export `app = agent_app` from `backend/src/agent/graph.py`; repository imports only reference `agent_app`.
+- 2026-10-22T10:04:02+00:00 — Re-ran `backend/tests/test_execution_graph_shape.py` (3 passed) to confirm graph wiring remains intact.
+- 2026-10-22T10:31:16+00:00 — Updated `backend/src/agent/nodes/input_security_gate.py` with strict required-tag envelope validation (`_require_tag`) for planner responses so malformed/incomplete tags are rejected before `_parse_response` (including explicit missing-`</data>` detection).
+- 2026-10-22T10:31:16+00:00 — Enhanced planner-validation failure payloads to include `attempt` and corrective `instruction`, incrementing from prior `planner_error.attempt` to produce distinct retry prompts and reduce identical cache-key replay loops.
+- 2026-10-22T10:31:16+00:00 — Added/updated focused tests in `backend/tests/test_planner_response_gate.py` for malformed closing-tag rejection and retry-attempt increment behavior; verified via `backend/.venv/bin/python -m pytest tests/test_planner_response_gate.py -q` (6 passed).
+- 2026-10-22T10:50:01+00:00 — Updated `backend/src/models/llm_client.py` `LiteLLMProvider` to detect provider errors that indicate unsupported `temperature` values and retry the same request without the `temperature` parameter (sync and stream paths), preserving existing `stream_options` fallback behavior.
+- 2026-10-22T10:50:01+00:00 — Added focused regression tests in `backend/tests/test_llm_mock_mode.py` covering sync and stream retry-without-temperature behavior when the gateway rejects non-default temperature values.
+- 2026-10-22T10:50:01+00:00 — Verified with `backend/.venv/bin/python -m pytest backend/tests/test_llm_mock_mode.py -q` (22 passed) and refreshed backend graph metadata via `graphify update .` from `backend/`.
+- 2026-10-26T07:41:37+00:00 — Added ContextVar-backed `llm.started`, `llm.done`, and `llm.error` emission around sync, stream, and cached calls in `backend/src/models/llm_client.py`, including stable call IDs and child/agent source correlation, and forwarded those events through `AgentRuntime` and the WebSocket client.
+- 2026-10-26T07:41:37+00:00 — Moved tool/subagent start fanout to `execution_dispatcher` phase events, included action IDs and arguments, and changed `output_security_gate` to emit resource-specific completion plus plan-step completion events.
+- 2026-10-26T07:41:37+00:00 — Updated `EnhancedChatView`, activity types, and `agentSteps` matching so active LLM calls always render a bottom thinking row and repeated/parallel resources correlate by action ID with name fallback.
+- 2026-10-26T07:41:37+00:00 — Added lifecycle, dispatcher fanout, planned resource completion, sequential-thinking, and duplicate-resource regression coverage; verified 75 focused backend tests, 20 focused frontend tests, and the frontend production build. The standalone typecheck remains blocked by pre-existing errors in `ChatSidebar`, `EnhancedChatView`, `PlanDisplayPanels`, `UIResourceRenderer`, `animated-background`, Vite config typing, and the empty Convex input set.

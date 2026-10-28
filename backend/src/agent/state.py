@@ -5,8 +5,8 @@ from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
 
 
-def merge_phase_results(left: list[dict], right: list[dict]) -> list[dict]:
-    """A collector may reset completed results without replaying them into later phases."""
+def merge_step_results(left: list[dict], right: list[dict]) -> list[dict]:
+    """Merge parallel executor results; an empty update clears a completed batch."""
     return right if not right else left + right
 
 class AgentConfig(BaseModel):
@@ -59,9 +59,16 @@ class PlanExecuteState(TypedDict):
     plan_created: Dict[str, Any]
     plan_event: Dict[str, Any]
     step_events: List[dict[str, Any]]
-    phase_step_results: Annotated[list[dict[str, Any]], merge_phase_results]
+    step_results: Annotated[list[dict[str, Any]], merge_step_results]
     planner_response: str
     planner_response_type: str
     planner_error: Dict[str, Any]
     planner_resources: List[dict[str, str]]
     planner_mode: bool
+    action_sequence: int
+    executor_output: Dict[str, Any]
+    output_events: List[dict[str, Any]]
+    dispatch_target: str
+    dispatch_step: Dict[str, Any]
+    pending_context_selection: Dict[str, Any]
+    human_request_kind: str

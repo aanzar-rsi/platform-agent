@@ -40,6 +40,7 @@ def _safe_learned_experiences(
     execution_history: list,
     *,
     uid: str | None = None,
+    available_resources: set[tuple[str, str]] | None = None,
 ) -> str:
     """Retrieve experience chunks; never raise into the agent loop and never
     block it for more than a few seconds."""
@@ -58,7 +59,8 @@ def _safe_learned_experiences(
 
         future = _experience_executor.submit(copy_context().run, retrieve_experiences,
                                              user_query, prior_task=prior_task,
-                                             prior_tool=prior_tool, uid=uid)
+                                             prior_tool=prior_tool, execution_history=execution_history,
+                                             available_resources=available_resources, uid=uid)
         try:
             chunks = future.result(timeout=_EXPERIENCE_TIMEOUT_SECONDS)
         except FutureTimeoutError:
@@ -425,12 +427,17 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
         )
 
     if injected_note:
-        key = f"human_pause_{len(execution_memory) + 1}"
-        execution_memory, context_memory, _ = record_execution(
-            execution_memory, context_memory, key=key, value=injected_note,
-            description="User instruction supplied while agent was paused",
-            entry_type="human_input", name="user", task="Pause instruction",
-        )
+        from src.agent.nodes.output_security_gate import sanitize_executor_output
+
+        execution_id = str(configurable.get("execution_id") or "execution")
+        return {"executor_output": sanitize_executor_output({
+            "version": 1, "action_id": f"{execution_id}:agent-pause:{len(messages)}",
+            "source": "human_input", "results": [{
+                "kind": "human_input", "value": injected_note, "success": True,
+                "task": "Pause instruction", "description": "User instruction supplied while agent was paused",
+                "metadata": {"input_kind": "paused"},
+            }],
+        })}
 
     # Child IDs are runtime-generated, so the deterministic next action is to
     # collect pending children before asking the planner to decide anything else.
@@ -445,27 +452,23 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
             },
             "messages": [AIMessage(content=f"Collecting child {child_id}", additional_kwargs={"ui_hidden": True})],
         }
-        if injected_note:
-            update["messages"] = [
-                HumanMessage(
-                    content=injected_note,
-                    additional_kwargs={
-                        "ui_hidden": True,
-                        "ui_step": {"type": "reasoning", "content": f"User response: {injected_note}"},
-                    },
-                )
-            ] + update["messages"]
         if execution_memory is not original_execution_memory:
             update.update(execution_memory=execution_memory, context_memory=context_memory)
         return update
-
-    learned = _safe_learned_experiences(user_query, execution_history, uid=uid) if uid else "(none)"
 
     effective_armory = (configurable.get("policy") or {}).get("armory") or {}
     resources = Armory(effective_armory, user_id=uid,
                        preloaded_context=state.get("preloaded_context")).list(reconnect=True)
     tools = [resource for resource in resources if resource.type == "tool"]
     subagents = [resource for resource in resources if resource.type == "subagent"]
+    available_resources = {(resource.type, resource.name) for resource in resources}
+    available_resources.update(
+        ("mcp_server", resource.name) for resource in resources
+        if resource.type == "tool" and resource.name.startswith("mcp_")
+    )
+    learned = _safe_learned_experiences(
+        user_query, execution_history, uid=uid, available_resources=available_resources,
+    ) if uid else "(none)"
 
     first_request = sum(getattr(message, "type", None) == "human" for message in messages) == 1 and not execution_history
     use_fast_prompt = first_request or len((user_query or "").strip()) < 10
@@ -483,6 +486,7 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
             tools=tools,
             subagents=subagents,
             conversation=conversation_text,
+            learned_experiences=learned,
         )
     else:
         system_prompt, prompt = planner_agent_prompt_loader(
@@ -497,6 +501,7 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
             max_plan_steps=int(configurable.get("max_plan_steps") or 8),
             child_mode=bool(configurable.get("child_agent_id")),
             planner_error=state.get("planner_error"),
+            learned_experiences=learned,
         )
 
     if traced:

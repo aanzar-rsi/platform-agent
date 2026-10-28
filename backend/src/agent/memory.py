@@ -44,6 +44,11 @@ def count_content_tokens(content: Any) -> int:
     return count_tokens(text)["input"]
 
 
+def _prompt_tokens(content: Any) -> int:
+    """Count the representation actually placed in the planner prompt."""
+    return count_tokens(toons.dumps(content))["input"]
+
+
 def _token_count_of_value(value: Any) -> int:
     if value is None or value == "":
         return 0
@@ -84,8 +89,8 @@ def slice_by_tokens(
             return content, 0, total_tokens, total_tokens, False
         return text, 0, total_tokens, total_tokens, False
 
-    char_start = start * _CHARS_PER_TOKEN
-    char_end = end * _CHARS_PER_TOKEN
+    char_start = min(len(text), start * _CHARS_PER_TOKEN)
+    char_end = min(len(text), end * _CHARS_PER_TOKEN)
     sliced: Any = text[char_start:char_end]
 
     was_truncated = False
@@ -158,15 +163,11 @@ def slim_execution_history(
     for entry in execution_history or []:
         if not isinstance(entry, dict):
             continue
-        result = entry.get("result")
         slim.append(
             {
-                "type": entry.get("type"),
-                "name": entry.get("tool_name") or entry.get("agent_name") or "",
                 "task": entry.get("task") or "",
-                "key": entry.get("key") or "",
-                "tokens": count_content_tokens(result) if result is not None else 0,
                 "success": entry.get("success", True),
+                "status": entry.get("status") or "completed",
             }
         )
     return slim
@@ -195,71 +196,47 @@ def update_context_memory(
         dict(e) for e in cm.get("entries", []) if e.get("key") != key
     ]
 
-    sliced, actual_from, actual_to, total_tokens, was_truncated = slice_by_tokens(
+    sliced, actual_from, actual_to, total_tokens, _ = slice_by_tokens(
         content,
         from_token=from_token,
         to_token=to_token,
-        budget=budget,
     )
-    new_tokens = _token_count_of_value(sliced)
+    new_entry = {
+        "key": key, "tokens": _token_count_of_value(sliced),
+        "from_token": actual_from, "to_token": actual_to,
+        "total_tokens": total_tokens, "content": sliced,
+        "complete": actual_from == 0 and actual_to >= total_tokens,
+        "truncated": actual_from != 0 or actual_to < total_tokens,
+    }
+    entries.append(new_entry)
 
-    used = sum(_entry_tokens(e) for e in entries)
-    while entries and used + new_tokens > budget:
-        excess = used + new_tokens - budget
-        oldest = entries[0]
-        oldest_tokens = _entry_tokens(oldest)
-        if oldest_tokens <= excess:
-            entries.pop(0)
-            used -= oldest_tokens
-            continue
-        trimmed, actual_from, actual_to, total, truncated = slice_by_tokens(
-            oldest.get("content"), from_token=excess,
-        )
-        # The content is already a window, so translate local offsets back to
-        # the original execution value's token coordinates.
-        original_from = int(oldest.get("from_token") or 0)
-        oldest.update(
-            content=trimmed,
-            tokens=_token_count_of_value(trimmed),
-            from_token=original_from + actual_from,
-            to_token=original_from + actual_to,
-            total_tokens=int(oldest.get("total_tokens") or total),
-            complete=False,
-            truncated=True,
-        )
-        used = sum(_entry_tokens(e) for e in entries)
+    def size() -> int:
+        return _prompt_tokens({"budget_tokens": budget, "used_tokens": sum(_entry_tokens(e) for e in entries),
+                               "truncated": any(e["truncated"] for e in entries), "entries": entries})
 
-    if new_tokens > budget:
-        sliced, actual_from, actual_to, total_tokens, was_truncated = slice_by_tokens(
-            content,
-            from_token=from_token,
-            to_token=to_token,
-            budget=budget,
-        )
-        new_tokens = _token_count_of_value(sliced)
-        entries = []
-        used = 0
-
-    complete = actual_from == 0 and actual_to >= total_tokens and not was_truncated
-    entries.append(
-        {
-            "key": key,
-            "tokens": new_tokens,
-            "from_token": actual_from,
-            "to_token": actual_to,
-            "total_tokens": total_tokens,
-            "content": sliced,
-            "complete": complete,
-            "truncated": not complete,
-        }
-    )
-    used += new_tokens
+    while size() > budget:
+        entry = entries[0]
+        # Preserve the newest selection; evict/trim older windows first.
+        excess = max(1, size() - budget)
+        window = entry["content"]
+        text = serialize_content(window)
+        amount = min(len(text), excess * _CHARS_PER_TOKEN)
+        trimmed = text[amount:] if len(entries) > 1 else text[:len(text) - amount]
+        removed = len(text) - len(trimmed)
+        if not removed:
+            if len(entries) > 1:
+                entries.pop(0)
+                continue
+            raise ValueError("context memory metadata exceeds budget")
+        if len(entries) > 1:
+            entry["from_token"] = min(entry["to_token"], entry["from_token"] + removed // _CHARS_PER_TOKEN)
+        else:
+            entry["to_token"] = max(entry["from_token"], entry["to_token"] - removed // _CHARS_PER_TOKEN)
+        entry.update(content=trimmed, tokens=_token_count_of_value(trimmed), complete=False, truncated=True)
 
     cm["entries"] = entries
-    cm["used_tokens"] = used
-    # Compatibility field: whether this insertion was budget-clipped. Entry
-    # completeness is authoritative because older windows may also be partial.
-    cm["truncated"] = was_truncated
+    cm["used_tokens"] = sum(_entry_tokens(e) for e in entries)
+    cm["truncated"] = any(e["truncated"] for e in entries)
     return cm
 
 

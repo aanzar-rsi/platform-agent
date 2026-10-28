@@ -84,7 +84,7 @@ class Settings(BaseSettings):
 
     # ── Agent behaviour ────────────────────────────────────────────────────
     agent_log_enabled: bool = Field(default=True, validation_alias="AGENT_LOG_ENABLED")
-    max_loops: int = Field(default=50, validation_alias="MAX_LOOPS")
+    max_loops: int = Field(default=500, validation_alias="MAX_LOOPS")
 
     # ── Experience / learner ───────────────────────────────────────────────
     experience_enabled: bool = Field(default=True, validation_alias="EXPERIENCE_ENABLED")

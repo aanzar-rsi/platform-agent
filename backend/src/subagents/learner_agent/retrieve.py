@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from src.subagents.learner_agent.config import EXPERIENCE_ENABLED, TOP_K
-from src.subagents.learner_agent.keys import build_embed_text
+from src.subagents.learner_agent.keys import build_decision_state, build_retrieval_queries
 from src.agent import kb
 from src.agent.policy_schema import effective_memory_policy, memory_action_allowed
 
@@ -18,6 +18,8 @@ def retrieve_experiences(
     *,
     prior_task: str = "",
     prior_tool: str = "",
+    execution_history: list[dict[str, Any]] | None = None,
+    available_resources: set[tuple[str, str]] | None = None,
     uid: str | None = None,
     top_k: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -42,17 +44,34 @@ def retrieve_experiences(
                 return []
             ceiling = ((PreferencesRepository().get(uid or "").get("agent") or {}).get("memory_policy_ceiling"))
             memory_policy = effective_memory_policy(agent.policy.memory, ceiling)
-            if not memory_action_allowed(memory_policy, action="read", scope="USER", chunk_type="workflow"):
-                return []
             policy = {**memory_policy, "version": agent.policy.version}
         else:
             policy = {"read": ["USER", "AGENT"], "write": ["USER"], "tenant_id": None}
-        key = build_embed_text(
-            user_query,
-            prior_task=prior_task or "",
-            prior_tool=prior_tool or "",
-        )
-        return kb.search(uid or "", policy, key, top_k=top_k if top_k is not None else TOP_K)
+        history = list(execution_history or [])
+        if not history and (prior_task or prior_tool):
+            history = [{"task": prior_task, "tool_name": prior_tool, "success": True}]
+        decision = build_decision_state(user_query, history)
+        stage = decision["decision_stage"]
+        lane_types = {
+            "entry": {"user_preference", "user_details", "tenant_details", "workflow", "resource", "anti_pattern"},
+            "transition": {"user_preference", "user_details", "workflow", "resource", "anti_pattern"},
+            "recovery": {"user_preference", "troubleshooting", "anti_pattern", "workflow", "resource"},
+        }[stage]
+        limit = top_k if top_k is not None else TOP_K
+        merged: dict[str, dict[str, Any]] = {}
+        for query in build_retrieval_queries(decision):
+            for chunk in kb.search(uid or "", policy, query, top_k=limit, chunk_types=lane_types):
+                metadata = chunk.get("metadata") or {}
+                resource_name = str(metadata.get("resource_name") or "")
+                resource_type = str(metadata.get("resource_type") or "")
+                if resource_name and available_resources is not None and (resource_type, resource_name) not in available_resources:
+                    continue
+                chunk_stage = metadata.get("decision_stage") or "general"
+                chunk["score"] = float(chunk.get("score") or 0) + (0.15 if chunk_stage in {stage, "general"} else -0.1)
+                chunk_id = str(chunk.get("chunk_id") or "")
+                if chunk_id not in merged or chunk["score"] > merged[chunk_id]["score"]:
+                    merged[chunk_id] = chunk
+        return sorted(merged.values(), key=lambda item: item["score"], reverse=True)[:limit]
     except Exception as exc:
         from src.utils.trace import in_run, emit
 
@@ -66,20 +85,11 @@ def retrieve_experiences(
 def format_experiences_for_prompt(chunks: list[dict[str, Any]]) -> str:
     if not chunks:
         return "(none)"
-    lines: list[str] = []
-    for i, chunk in enumerate(chunks, start=1):
+    grouped: dict[str, list[str]] = {}
+    for chunk in chunks:
         advice = (chunk.get("content") or chunk.get("advice") or "").strip()
         meta = chunk.get("metadata") or {}
-        outcome = meta.get("outcome") or ""
-        tool = meta.get("observed_tool") or ""
-        score = chunk.get("score")
-        header = f"{i}."
-        if tool:
-            header += f" [tool={tool}"
-            if outcome:
-                header += f", outcome={outcome}"
-            header += "]"
-        if isinstance(score, (int, float)):
-            header += f" (sim={score:.3f})"
-        lines.append(f"{header}\n{advice}")
-    return "\n\n".join(lines)
+        label = str(chunk.get("chunk_type") or "memory").replace("_", " ").title()
+        stage = meta.get("decision_stage")
+        grouped.setdefault(label, []).append(f"- {advice}" + (f" [stage={stage}]" if stage else ""))
+    return "\n\n".join(f"{label}:\n" + "\n".join(items) for label, items in grouped.items())

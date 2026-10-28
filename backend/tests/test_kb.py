@@ -13,6 +13,18 @@ U1, U2 = str(uuid.uuid4()), str(uuid.uuid4())
 POLICY = {"read": ["USER", "TENANT", "AGENT"], "write": ["USER"], "tenant_id": "acme"}
 
 
+def publisher_policy(*, allow_admin_promotion: bool = True) -> dict:
+    return {
+        "read": ["USER", "AGENT"], "write": ["USER", "AGENT"],
+        "promote": ["AGENT"], "publish": ["AGENT"],
+        "allow_admin_promotion": allow_admin_promotion,
+        "chunks": {"workflow": {
+            "enabled": True, "read": ["USER", "AGENT"], "write": ["USER", "AGENT"],
+            "promote": ["AGENT"], "allow_admin_promotion": allow_admin_promotion,
+        }},
+    }
+
+
 @pytest.fixture(autouse=True)
 def _reset_chroma_flag():
     kb._chroma_failed = False
@@ -78,7 +90,9 @@ def test_search_prefilters_then_revalidates_authority():
          patch.object(kb, "get_connection", return_value=conn):
         hits = kb.search(U1, {"read": ["USER"]}, "query")
     assert [hit["active_version_id"] for hit in hits] == ["v_good"]
-    assert collection.calls[0]["where"] == {"owner_user_id": U1}
+    assert collection.calls[0]["where"] == {"$and": [
+        {"owner_user_id": U1}, {"chunk_type": {"$in": sorted(kb.TYPES)}},
+    ]}
 
 
 def test_no_tenant_means_no_tenant_query():
@@ -96,7 +110,9 @@ def test_tenant_query_uses_trusted_policy_filter():
          patch.object(kb, "get_connection", return_value=conn):
         hits = kb.search(U1, {"read": ["TENANT"], "tenant_id": "acme"}, "query")
     assert [hit["active_version_id"] for hit in hits] == ["v_good"]
-    assert collection.calls[0]["where"] == {"tenant_id": "acme"}
+    assert collection.calls[0]["where"] == {"$and": [
+        {"tenant_id": "acme"}, {"chunk_type": {"$in": sorted(kb.TYPES)}},
+    ]}
 
 
 def test_search_returns_empty_when_chroma_unavailable():
@@ -136,10 +152,33 @@ def test_governance_admin_and_sanitization():
     with patch.object(kb, "get_connection", return_value=conn), patch.object(kb, "_row", return_value=dict(row(), sensitivity="INTERNAL")):
         with pytest.raises(ValueError, match="generalization_required"):
             kb.review_promotion(U2, "admin", "pr_1", approve=True,
-                                policy={"write": ["AGENT"], "publish": ["AGENT"]})
+                                policy=publisher_policy())
         with pytest.raises(ValueError, match="generalization_required"):
             kb.review_promotion(U1, "admin", "pr_1", approve=True,
-                                policy={"write": ["AGENT"], "publish": ["AGENT"]})
+                                policy=publisher_policy())
+
+
+def test_publication_requires_chunk_admin_promotion_permission():
+    assert kb._publication_allowed(publisher_policy(), chunk_type="workflow", target_scope="AGENT")
+    assert not kb._publication_allowed(
+        publisher_policy(allow_admin_promotion=False), chunk_type="workflow", target_scope="AGENT"
+    )
+
+
+@pytest.mark.parametrize("private_content", [
+    "customer_id=acme-123",
+    "tenant_name=Acme",
+    "host=db.internal",
+    "database=customer_prod",
+])
+def test_agent_publication_privacy_patterns(private_content):
+    assert kb._PRIVATE.search(private_content)
+
+
+def test_expiry_requires_known_retention_class():
+    with pytest.raises(ValueError, match="invalid_retention_class"):
+        kb.set_expiry(U1, "admin", "chk_one", publisher_policy(), None,
+                      retention_class="FOREVER")
 
 
 def test_promoted_target_visibility_and_revocation():
@@ -198,8 +237,7 @@ def test_admin_promotion_roundtrip():
     collections = {scope: client.get_or_create_collection(name, metadata={"hnsw:space": "cosine"})
                    for scope, name in kb.COLLECTIONS.items()}
     policy = {"read": ["USER", "AGENT"], "write": ["USER"], "tenant_id": None}
-    publisher = {"read": ["USER", "AGENT"], "write": ["USER", "AGENT"],
-                 "publish": ["AGENT"], "tenant_id": None}
+    publisher = publisher_policy()
     with get_connection() as conn:
         with patch.object(kb, "get_connection", return_value=type("Lease", (), {
             "__enter__": lambda self: conn, "__exit__": lambda self, *_: None})()), \
@@ -214,6 +252,20 @@ def test_admin_promotion_roundtrip():
                 again = kb.review_promotion(admin, "admin", request["request_id"], approve=True, policy=publisher)
                 assert again["target_chunk_id"] == result["target_chunk_id"]
                 assert [x["chunk_id"] for x in kb.search(admin, publisher, "procedure") if x["scope"] == "AGENT"] == [result["target_chunk_id"]]
+                expiry = kb.set_expiry(admin, "admin", result["target_chunk_id"], publisher, None,
+                                       retention_class="STANDARD")
+                assert expiry["retention_class"] == "STANDARD"
                 kb.revoke(admin, "admin", result["target_chunk_id"], publisher)
                 assert all(x["chunk_id"] != result["target_chunk_id"] for x in kb.search(admin, publisher, "procedure"))
                 assert kb.history(owner, policy, source["chunk_id"])["status"] == "ACTIVE"
+
+                private_source = kb.write(owner, policy, "customer-specific database procedure")
+                private_request = kb.request_promotion(
+                    owner, policy, private_source["chunk_id"], "AGENT",
+                    idempotency_key=str(uuid.uuid4()), proposed_content="database=customer_prod",
+                )
+                with pytest.raises(ValueError, match="generalization_required"):
+                    kb.review_promotion(admin, "admin", private_request["request_id"], approve=True,
+                                        policy=publisher)
+                assert kb.promotion_detail(admin, "admin", private_request["request_id"])["state"] == "PROMOTION_FAILED"
+                assert kb.history(owner, policy, private_source["chunk_id"])["status"] == "ACTIVE"

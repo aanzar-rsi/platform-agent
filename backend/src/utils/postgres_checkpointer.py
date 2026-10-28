@@ -547,7 +547,8 @@ def initial_state_for_thread(
     human = HumanMessage(content=query)
     if thread_has_state(thread_id):
         return {"messages": [human], "planned_phases": [], "planned_phase_index": 0,
-                "plan_created": {}, "plan_event": {}, "step_events": [], "phase_step_results": []}
+                "plan_created": {}, "plan_event": {}, "step_events": [], "step_results": [],
+                "executor_output": {}, "output_events": [], "dispatch_target": ""}
     return {
         "messages": [human],
         "execution_history": [],
@@ -567,7 +568,14 @@ def initial_state_for_thread(
         "plan_created": {},
         "plan_event": {},
         "step_events": [],
-        "phase_step_results": [],
+        "step_results": [],
+        "action_sequence": 0,
+        "executor_output": {},
+        "output_events": [],
+        "dispatch_target": "",
+        "dispatch_step": {},
+        "pending_context_selection": {},
+        "human_request_kind": "",
     }
 
 

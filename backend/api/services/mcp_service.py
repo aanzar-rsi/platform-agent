@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from api.core.deps import CurrentUser, Repositories
 from api.domain.memory import McpCreateRequest, McpUpdateRequest
 from api.services.mcp_runtime import mcp_runtime
+from api.services.mcp_auth import encrypt, public_auth
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,10 @@ def connection_log(level: str, message: str) -> dict[str, str]:
 
 def public_server(uid: str, server: dict[str, Any]) -> dict[str, Any]:
     conn = mcp_runtime.get(uid, server["id"])
-    return {**server, "connected": conn is not None, "tools_count": len(conn.tools) if conn else 0,
-            "connection_error": mcp_runtime.failure(uid, server["id"])}
+    auth = server.get("_auth") or (server.get("metadata") or {}).get("_auth")
+    metadata = {key: value for key, value in (server.get("metadata") or {}).items() if key != "_auth"}
+    return {key: value for key, value in {**server, "metadata": metadata, "auth": public_auth(auth), "connected": conn is not None,
+            "tools_count": len(conn.tools) if conn else 0, "connection_error": mcp_runtime.failure(uid, server["id"])}.items() if key != "_auth"}
 
 
 class McpService:
@@ -32,32 +35,44 @@ class McpService:
         return [public_server(user.uid, server) for server in self.repos.mcp.list(user.uid)]
 
     def create(self, user: CurrentUser, body: McpCreateRequest) -> dict[str, Any]:
+        if body.auth and not body.url:
+            raise HTTPException(status_code=422, detail="MCP login authentication requires an HTTP server URL")
+        auth = self._stored_auth(body.auth, username=user.uid) if body.auth else None
         server = self.repos.mcp.create(
             user.uid, name=body.name.strip(), url=body.url or "",
             metadata={**body.metadata, "command": body.command, "transport": body.transport,
-                      "args": body.args,
-                      "env": body.env, "enabled": body.enabled},
+                       "args": body.args,
+                       "env": body.env, "enabled": body.enabled, **({"_auth": auth} if auth else {})},
         )
         try:
             result = self.connect(user, server["id"])
-            return {**public_server(user.uid, server), "connection_logs": result["logs"]}
+            return {**public_server(user.uid, self.repos.mcp.get(user.uid, server["id"]) or server), "connection_logs": result["logs"]}
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {"message": exc.detail, "logs": []}
-            return {**public_server(user.uid, server), "connection_error": detail["message"], "connection_logs": detail["logs"]}
+            return {**public_server(user.uid, self.repos.mcp.get(user.uid, server["id"]) or server), "connection_error": detail["message"], "connection_logs": detail["logs"]}
 
     def update(self, user: CurrentUser, server_id: str, body: McpUpdateRequest) -> dict[str, Any]:
         existing = self.repos.mcp.get(user.uid, server_id)
         if not existing:
             raise HTTPException(status_code=404, detail="MCP server not found")
         fields = body.model_dump(exclude_unset=True)
+        auth_supplied = "auth" in fields
+        auth_request = fields.pop("auth", None)
         if "name" in fields and not (fields["name"] or "").strip():
             raise HTTPException(status_code=422, detail="Name cannot be blank")
         metadata_fields = {key: fields.pop(key) for key in ("command", "transport", "args", "env", "enabled") if key in fields}
         if metadata_fields or "metadata" in fields:
             fields["metadata"] = {**existing["metadata"], **(fields.get("metadata") or {}), **metadata_fields}
+        if auth_supplied:
+            if auth_request is None:
+                fields["metadata"] = {**fields.get("metadata", existing["metadata"]), "_auth": None}
+            else:
+                if not existing.get("url") and "url" not in fields:
+                    raise HTTPException(status_code=422, detail="MCP login authentication requires an HTTP server URL")
+                fields["metadata"] = {**fields.get("metadata", existing["metadata"]), "_auth": self._stored_auth(auth_request, existing.get("_auth"), username=user.uid)}
         if "url" in fields and fields["url"] is None:
             fields["url"] = ""
-        if "url" in fields or any(key in metadata_fields for key in ("command", "transport", "args", "env")):
+        if "url" in fields or auth_supplied or any(key in metadata_fields for key in ("command", "transport", "args", "env")):
             candidate = {**existing, **fields, **metadata_fields}
             if fields.get("url") and metadata_fields.get("command"):
                 raise HTTPException(status_code=422, detail="Choose either URL or command")
@@ -72,11 +87,26 @@ class McpService:
         doc = self.repos.mcp.update(
             user.uid, server_id, **fields
         )
-        if "url" in fields or any(key in metadata_fields for key in ("command", "transport", "args", "env")):
+        if "url" in fields or auth_supplied or any(key in metadata_fields for key in ("command", "transport", "args", "env")):
             mcp_runtime.disconnect(user.uid, server_id)
         if metadata_fields.get("enabled") is False:
             mcp_runtime.disconnect(user.uid, server_id)
         return public_server(user.uid, doc)
+
+    @staticmethod
+    def _stored_auth(auth, existing: dict[str, Any] | None = None, *, username: str = "") -> dict[str, Any]:
+        data = auth.model_dump() if hasattr(auth, "model_dump") else dict(auth)
+        if data.get("use_agent_credentials"):
+            data["username"] = username
+        password = data.get("password") or ""
+        if not password and existing:
+            data["password"] = existing.get("password", "")
+        else:
+            if not password:
+                raise HTTPException(status_code=422, detail="MCP login password is required")
+            data["password"] = encrypt(password)
+        data.pop("token", None)
+        return data
 
     def connect(self, user: CurrentUser, server_id: str) -> dict[str, Any]:
         server = self.repos.mcp.get(user.uid, server_id)

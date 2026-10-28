@@ -42,13 +42,16 @@ TEMPLATES = {
         "execution_memory_index", "context_memory", "preloaded_context",
         "persona", "constraints", "user_preferences",
     }),
-    "fast_agent": (_MAIN, {"persona", "user_query", "conversation"}),
+    "fast_agent": (_MAIN, {"persona", "user_query", "conversation", "learned_experiences"}),
     "planner_agent": (_MAIN, {
         "persona", "user_query", "conversation", "current_task", "execution_history",
         "execution_memory_index", "context_memory", "constraints", "armory", "max_plan_steps", "child_mode",
-        "planner_error",
+        "planner_error", "learned_experiences",
     }),
-    "extract_tool_chunks": (_LEARNER, {"user_query", "messages_summary", "execution_history"}),
+    "extract_memory_chunks": (_LEARNER, {
+        "user_query", "messages_summary", "conversation_messages", "execution_history",
+        "decision_snapshots", "allowed_chunk_types",
+    }),
 }
 
 

@@ -81,6 +81,8 @@ import {
   appendSubagentProgress,
   appendSubagentStarted,
   appendToolStarted,
+  finishChildReasoning,
+  finishReasoningStep,
   formatReadablePayload,
   stepsFromLegacyMetadata,
   updateChildFinished,
@@ -833,6 +835,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
   const [liveCacheHit, setLiveCacheHit] = useState(false);
   const [liveTools, setLiveTools] = useState<ToolCallEvent[]>([]);
   const [liveSteps, setLiveSteps] = useState<AgentStep[]>([]);
+  const [activeLlmCalls, setActiveLlmCalls] = useState<Set<string>>(() => new Set());
   const [currentNode, setCurrentNode] = useState<string | null>(null);
   const [activeInFlightQuery, setActiveInFlightQuery] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
@@ -996,6 +999,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
     setCurrentNode(null);
     setPendingInterrupt(null);
     setLiveCacheHit(false);
+    setActiveLlmCalls(new Set());
     streamingOutputRef.current = "";
     streamingReasoningRef.current = "";
     liveCacheHitRef.current = false;
@@ -1442,10 +1446,36 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
           liveCacheHitRef.current = true;
           setLiveCacheHit(true);
         },
+        onLlmStarted: (payload) => {
+          if (ignoreStaleRunEventsRef.current || !payload.call_id) return;
+          setActiveLlmCalls((current) => new Set(current).add(payload.call_id));
+        },
+        onLlmDone: (payload) => {
+          if (ignoreStaleRunEventsRef.current) return;
+          setActiveLlmCalls((current) => {
+            const next = new Set(current);
+            next.delete(payload.call_id);
+            return next;
+          });
+          if (payload.child_agent_id) finishChildReasoning(liveStepsRef.current, payload.child_agent_id);
+          else finishReasoningStep(liveStepsRef.current);
+          setLiveSteps([...liveStepsRef.current]);
+        },
+        onLlmError: (payload) => {
+          if (ignoreStaleRunEventsRef.current) return;
+          setActiveLlmCalls((current) => {
+            const next = new Set(current);
+            next.delete(payload.call_id);
+            return next;
+          });
+          if (payload.child_agent_id) finishChildReasoning(liveStepsRef.current, payload.child_agent_id);
+          else finishReasoningStep(liveStepsRef.current);
+          setLiveSteps([...liveStepsRef.current]);
+        },
         onToolStarted: (payload) => {
           if (ignoreStaleRunEventsRef.current) return;
           const tool: ToolCallEvent = {
-            id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            id: payload.action_id || `tool_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
             tool_name: payload.tool_name,
             tool_args: payload.tool_args,
             task: payload.task,
@@ -1458,8 +1488,11 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
         },
         onToolFinished: (payload) => {
           if (ignoreStaleRunEventsRef.current) return;
+          const toolId = payload.action_id || [...liveToolsRef.current].reverse().find(
+            (tool) => tool.tool_name === payload.tool_name && tool.status === "running"
+          )?.id;
           liveToolsRef.current = liveToolsRef.current.map((t) =>
-            t.tool_name === payload.tool_name && t.status === "running"
+            toolId && t.id === toolId
               ? {
                   ...t,
                   tool_args: payload.tool_args ?? t.tool_args,
@@ -1477,14 +1510,14 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
             result: payload.result as string | undefined,
             success: payload.success,
             status: payload.success === false ? "error" : "done",
-          });
+          }, payload.action_id);
           setLiveSteps([...liveStepsRef.current]);
         },
         onSubagentStarted: (payload) => {
           if (ignoreStaleRunEventsRef.current) return;
           if (!payload.agent_name) return;
           const subagent: SubagentCallEvent = {
-            id: `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            id: payload.action_id || `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
             agent_name: payload.agent_name,
             task: payload.task,
             tool_args: payload.tool_args,
@@ -1510,7 +1543,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
             success: payload.success,
             status: payload.success === false ? "error" : "done",
             endedAt: Date.now(),
-          });
+          }, payload.action_id);
           setLiveSteps([...liveStepsRef.current]);
         },
         onChildStarted: (payload) => {
@@ -2342,7 +2375,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
             const taskLabel = subagent.task?.trim() || `Child: ${subagent.child_agent_id || subagent.agent_name}`;
             return (
               <Fragment key={`${subagent.id || "child"}-${index}`}>
-                <Collapsible defaultOpen className="group/subagent w-full">
+                <Collapsible defaultOpen={false} className="group/subagent w-full">
                   <div className="flex items-start w-full">
                     <StepBranchTarget
                       checkpointId={showBranchActions ? stepCheckpointId : undefined}
@@ -2358,7 +2391,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
                       </div>
                     </StepBranchTarget>
                     <CollapsibleTrigger asChild>
-                      <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0 opacity-50 hover:opacity-100" title="Show child details">
+                      <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0 opacity-50 hover:opacity-100" title="Show child details" aria-label={`Show execution for ${taskLabel}`}>
                         <ChevronRight className="h-3 w-3 group-data-[state=open]/subagent:hidden" />
                         <ChevronDown className="h-3 w-3 hidden group-data-[state=open]/subagent:inline" />
                       </Button>
@@ -2377,8 +2410,9 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
 
           const { tool } = step;
           if (!tool) return null;
-          const taskLabel = tool.task?.trim() || tool.tool_name;
-          const showToolName = Boolean(tool.task?.trim() && tool.task.trim() !== tool.tool_name);
+          const resourceName = tool.tool_name || (tool as ToolCallEvent & { name?: string }).name || "Unknown resource";
+          const taskLabel = tool.task?.trim() || resourceName;
+          const showResourceName = Boolean(tool.task?.trim() && tool.task.trim() !== resourceName);
           return (
             <Fragment key={`${tool.id || "tool"}-${index}`}>
               <Collapsible defaultOpen={false} className="group/tool w-full">
@@ -2395,10 +2429,11 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
                         aria-hidden
                       />
                       <Wrench className="h-3.5 w-3.5 shrink-0 opacity-60" style={{ color: "var(--theme-accent)" }} />
-                      <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
-                      {showToolName && (
-                        <span className="text-[10px] opacity-45 shrink-0">{tool.tool_name}</span>
-                      )}
+                        <span className="font-medium min-w-0 flex-1 break-words text-left">{taskLabel}</span>
+                        <span className="shrink-0 text-right text-[10px] leading-tight opacity-55">
+                          {showResourceName && <span className="block font-medium">{resourceName}</span>}
+                          <span className="block font-mono">{tool.id || "No call ID"}</span>
+                        </span>
                     </div>
                   </StepBranchTarget>
                   <CollapsibleTrigger asChild>
@@ -2720,7 +2755,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
                           <CacheHitBadge />
                         </div>
                       )}
-                      {streamingOutput ? (
+                      {streamingOutput && (
                         <div className={MARKDOWN_BUBBLE_CLASS}>
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm]}
@@ -2728,19 +2763,16 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
                           >
                             {stabilizeMarkdownLinks(streamingOutput)}
                           </ReactMarkdown>
-                          {isLoading && (
-                            <span className="inline-block w-2 h-4 ml-1 bg-brand animate-pulse" />
-                          )}
                         </div>
-                      ) : (
-                        !liveSteps.length &&
-                        !pendingInterrupt && (
+                      )}
+                      {!pendingInterrupt &&
+                        (activeLlmCalls.size > 0 || (!streamingOutput && !liveSteps.length && isLoading)) && (
                           <div className="flex items-center gap-3 text-sm opacity-70">
                             <CustomLoader className="custom-loader--inline" />
                             {currentNode ? formatNodeStatus(currentNode) : "Thinking…"}
                           </div>
                         )
-                      )}
+                      }
                       {pendingInterrupt && (
                         <InterruptPrompt
                           embedded

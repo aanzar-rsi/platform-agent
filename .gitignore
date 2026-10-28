@@ -48,5 +48,10 @@ Thumbs.db
 
 logs/
 tests/
+!backend/tests/
+backend/tests/*
+!backend/tests/test_output_security_gate.py
+!backend/tests/test_execution_graph_shape.py
+!backend/tests/test_startup.py
 requirements/
 graphify-out/

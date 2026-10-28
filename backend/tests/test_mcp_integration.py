@@ -11,7 +11,8 @@ from mcp.server.fastmcp import FastMCP
 
 from api.core.deps import CurrentUser
 from api.domain.memory import McpCreateRequest, McpUpdateRequest
-from api.services.mcp_runtime import McpRuntime, available_mcp_tools, call_mcp_tool, mcp_runtime
+from api.services.mcp_auth import decrypt, encrypt
+from api.services.mcp_runtime import McpConnection, McpRuntime, available_mcp_tools, call_mcp_tool, mcp_runtime
 from api.services.mcp_service import McpService
 
 
@@ -44,6 +45,53 @@ class MemoryRepo:
             server["env"] = server["metadata"].get("env", {})
             server["enabled"] = server["metadata"].get("enabled", True)
         return server
+
+
+def test_mcp_login_credentials_are_encrypted_and_not_public(monkeypatch):
+    monkeypatch.setenv("MCP_CREDENTIALS_KEY", "")
+    from api.core.config import get_settings
+    get_settings.cache_clear()
+    key = __import__("cryptography.fernet", fromlist=["Fernet"]).Fernet.generate_key().decode()
+    monkeypatch.setenv("MCP_CREDENTIALS_KEY", key)
+    get_settings.cache_clear()
+    try:
+        repo = MemoryRepo()
+        service = McpService(type("Repos", (), {"mcp": repo})())
+        user = CurrentUser(uid="alice", session_id="s", role="user", raw={})
+        with patch.object(service, "connect", return_value={"logs": []}):
+            server = service.create(user, McpCreateRequest(
+                name="secure", url="https://mcp.example/mcp",
+                auth={"login_url": "https://mcp.example/login", "username": "alice", "password": "secret"},
+            ))
+        stored = repo.get(user.uid, server["id"])["metadata"]["_auth"]
+        assert stored["password"] != "secret"
+        assert decrypt(stored["password"]) == "secret"
+        assert "password" not in server["auth"]
+        assert server["auth"]["password_configured"] is True
+    finally:
+        get_settings.cache_clear()
+
+
+def test_agent_credentials_use_current_user_id(monkeypatch):
+    from api.core.config import get_settings
+    key = __import__("cryptography.fernet", fromlist=["Fernet"]).Fernet.generate_key().decode()
+    monkeypatch.setenv("MCP_CREDENTIALS_KEY", key)
+    get_settings.cache_clear()
+    try:
+        repo = MemoryRepo()
+        service = McpService(type("Repos", (), {"mcp": repo})())
+        user = CurrentUser(uid="agent-user-id", session_id="s", role="user", raw={})
+        with patch.object(service, "connect", return_value={"logs": []}):
+            server = service.create(user, McpCreateRequest(
+                name="secure", url="https://mcp.example/mcp",
+                auth={"login_url": "https://mcp.example/auth/login", "username": "", "password": "secret",
+                      "use_agent_credentials": True},
+            ))
+        stored = repo.get(user.uid, server["id"])["metadata"]["_auth"]
+        assert stored["username"] == user.uid
+        assert server["auth"]["use_agent_credentials"] is True
+    finally:
+        get_settings.cache_clear()
 
 
 def test_stdio_import_connect_discover_and_agent_call():
@@ -105,6 +153,20 @@ def test_connect_cancellation_returns_http_502_instead_of_escaping():
     assert exc.value.status_code == 502
     assert "transport cancelled" in exc.value.detail["message"]
     assert exc.value.detail["logs"][-1]["level"] == "ERROR"
+
+
+def test_stale_connection_cleanup_cancellation_does_not_block_reconnect():
+    connection = McpConnection.__new__(McpConnection)
+    connection.server = {"id": "server"}
+    connection.thread = type("Thread", (), {"is_alive": lambda self: True, "join": lambda self, timeout: None})()
+    connection.stopping = None
+    connection.worker = type("Worker", (), {"result": lambda self, timeout: (_ for _ in ()).throw(asyncio.CancelledError("cancel scope"))})()
+    connection.loop = type("Loop", (), {"call_soon_threadsafe": lambda self, callback: None, "stop": lambda self: None})()
+    connection.session = object()
+
+    connection.close()
+
+    assert connection.session is None
 
 
 def test_http_transport_connects_to_real_streamable_server():

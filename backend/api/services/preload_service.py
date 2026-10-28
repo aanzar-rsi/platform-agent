@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from api.core.deps import Repositories
+from api.services.mcp_service import public_server
 
 
 class PreloadService:
@@ -16,5 +17,5 @@ class PreloadService:
             "user": public,
             "preferences": self.repos.preferences.get(uid),
             "memory": self.repos.memory.get(uid),
-            "mcp_servers": self.repos.mcp.list(uid),
+            "mcp_servers": [public_server(uid, server) for server in self.repos.mcp.list(uid)],
         }

@@ -145,12 +145,15 @@ def process_idle_sessions(
 
         mark(agent_id, experience_learn_status="pending")
         last_status = "skipped"
+        session_results: list[dict[str, Any]] = []
         for leaf in pending_leaves:
             outcome = learn(agent_id, uid=uid, checkpoint_id=leaf)
             last_status = outcome.get("status") or "error"
-            if last_status in {"learned", "skipped"} and outcome.get("error") != "awaiting_extraction_confirmation":
+            retryable = last_status == "pending_confirmation" or outcome.get("error") == "awaiting_extraction_confirmation"
+            if last_status in {"learned", "skipped"} and not retryable:
                 mark_leaf(agent_id, leaf, status=last_status)
             results.append(outcome)
+            session_results.append(outcome)
             logger.info(
                 "Learner finished agent_id=%s leaf=%s status=%s stored=%s",
                 agent_id,
@@ -158,10 +161,15 @@ def process_idle_sessions(
                 last_status,
                 outcome.get("stored_count"),
             )
+        session_status = "pending_confirmation" if any(
+            result.get("status") == "pending_confirmation" or result.get("error") == "awaiting_extraction_confirmation"
+            for result in session_results
+        ) else last_status
         mark(
             agent_id,
-            experience_learn_status=last_status,
-            experience_learned_at=datetime.now(timezone.utc).isoformat(),
+            experience_learn_status=session_status,
+            **({"experience_learned_at": datetime.now(timezone.utc).isoformat()}
+               if session_status != "pending_confirmation" else {}),
         )
     return results
 

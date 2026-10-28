@@ -38,6 +38,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   clearNewChatPolicyPreset,
   getNewChatPolicyPreset,
@@ -72,6 +73,27 @@ interface SidebarSection {
   items?: { id: string; label: string; icon: any; path?: string }[];
 }
 
+type PolicyPresetMode = "form" | "json";
+type PolicyPresetForm = {
+  confirmTools: boolean;
+  memoryEnabled: boolean;
+  confirmBeforeExtracting: boolean;
+  allowAdminPromotion: boolean;
+  read: string[];
+  write: string[];
+  promote: string[];
+};
+
+const emptyPolicyPresetForm: PolicyPresetForm = {
+  confirmTools: false,
+  memoryEnabled: true,
+  confirmBeforeExtracting: false,
+  allowAdminPromotion: false,
+  read: [],
+  write: [],
+  promote: [],
+};
+
 const SidebarExecutionLoader = () => {
   return (
     <CustomLoader className="custom-loader--tiny" />
@@ -95,6 +117,8 @@ export default function ChatSidebar({ activeSessionId, executingSessionIds = [],
     '{\n  "armory": {},\n  "memory": {}\n}'
   );
   const [policyPresetError, setPolicyPresetError] = useState<string | null>(null);
+  const [policyPresetMode, setPolicyPresetMode] = useState<PolicyPresetMode>("form");
+  const [policyPresetForm, setPolicyPresetForm] = useState<PolicyPresetForm>(emptyPolicyPresetForm);
 
   const truncateSessionName = (text: string | undefined): string => {
     // Titles are already capped at 40 chars (+ "..."); avoid a second shorter cut.
@@ -174,6 +198,17 @@ export default function ChatSidebar({ activeSessionId, executingSessionIds = [],
 
   const openPolicyPresetDialog = () => {
     const preset = getNewChatPolicyPreset();
+    const armory = (preset?.armory || {}) as Record<string, unknown>;
+    const memory = (preset?.memory || {}) as Record<string, unknown>;
+    setPolicyPresetForm({
+      confirmTools: Boolean(armory.confirm_tools),
+      memoryEnabled: memory.enabled !== false,
+      confirmBeforeExtracting: Boolean(memory.confirm_before_extracting),
+      allowAdminPromotion: Boolean(memory.allow_admin_promotion),
+      read: Array.isArray(memory.read) ? memory.read.map(String) : [],
+      write: Array.isArray(memory.write) ? memory.write.map(String) : [],
+      promote: Array.isArray(memory.promote) ? memory.promote.map(String) : [],
+    });
     setPolicyPresetText(
       JSON.stringify(
         preset || {
@@ -185,13 +220,24 @@ export default function ChatSidebar({ activeSessionId, executingSessionIds = [],
       )
     );
     setPolicyPresetError(null);
+    setPolicyPresetMode("form");
     setPolicyPresetOpen(true);
   };
 
   const applyPolicyPreset = () => {
     setPolicyPresetError(null);
     try {
-      const parsed = JSON.parse(policyPresetText) as {
+      const parsed = (policyPresetMode === "json" ? JSON.parse(policyPresetText) : {
+        armory: { confirm_tools: policyPresetForm.confirmTools },
+        memory: {
+          enabled: policyPresetForm.memoryEnabled,
+          confirm_before_extracting: policyPresetForm.confirmBeforeExtracting,
+          allow_admin_promotion: policyPresetForm.allowAdminPromotion,
+          read: policyPresetForm.read,
+          write: policyPresetForm.write,
+          promote: policyPresetForm.promote,
+        },
+      }) as {
         armory?: Partial<AgentPolicyResponse["policy"]["armory"]>;
         memory?: Partial<AgentPolicyResponse["policy"]["memory"]>;
       };
@@ -211,6 +257,51 @@ export default function ChatSidebar({ activeSessionId, executingSessionIds = [],
       setPolicyPresetError(message);
       toast.error(`Could not save preset: ${message}`);
     }
+  };
+
+  const togglePresetScope = (field: "read" | "write" | "promote", scope: string, checked: boolean) => {
+    setPolicyPresetForm((current) => ({
+      ...current,
+      [field]: checked
+        ? Array.from(new Set([...current[field], scope]))
+        : current[field].filter((item) => item !== scope),
+    }));
+  };
+
+  const selectPolicyPresetMode = (mode: PolicyPresetMode) => {
+    setPolicyPresetError(null);
+    if (mode === "json") {
+      setPolicyPresetText(JSON.stringify({
+        armory: { confirm_tools: policyPresetForm.confirmTools },
+        memory: {
+          enabled: policyPresetForm.memoryEnabled,
+          confirm_before_extracting: policyPresetForm.confirmBeforeExtracting,
+          allow_admin_promotion: policyPresetForm.allowAdminPromotion,
+          read: policyPresetForm.read,
+          write: policyPresetForm.write,
+          promote: policyPresetForm.promote,
+        },
+      }, null, 2));
+    } else {
+      try {
+        const parsed = JSON.parse(policyPresetText) as Record<string, Record<string, unknown>>;
+        const armory = parsed.armory || {};
+        const memory = parsed.memory || {};
+        setPolicyPresetForm({
+          confirmTools: Boolean(armory.confirm_tools),
+          memoryEnabled: memory.enabled !== false,
+          confirmBeforeExtracting: Boolean(memory.confirm_before_extracting),
+          allowAdminPromotion: Boolean(memory.allow_admin_promotion),
+          read: Array.isArray(memory.read) ? memory.read.map(String) : [],
+          write: Array.isArray(memory.write) ? memory.write.map(String) : [],
+          promote: Array.isArray(memory.promote) ? memory.promote.map(String) : [],
+        });
+      } catch {
+        setPolicyPresetError("Fix the JSON before switching to form mode");
+        return;
+      }
+    }
+    setPolicyPresetMode(mode);
   };
 
   const handleDeleteChat = async (chatId: string) => {
@@ -428,10 +519,10 @@ export default function ChatSidebar({ activeSessionId, executingSessionIds = [],
             </Button>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex w-full overflow-hidden rounded-lg shadow-lg">
           <Button
             onClick={handleNewChat}
-            className="w-full transition-all border-0 shadow-lg rounded-lg font-medium h-12"
+            className="h-12 flex-1 rounded-none border-0 font-medium transition-all"
             style={{ 
               backgroundColor: 'var(--theme-accent)', 
               color: '#010101',
@@ -446,16 +537,17 @@ export default function ChatSidebar({ activeSessionId, executingSessionIds = [],
           <Button
             variant="ghost"
             size="icon"
-            className="h-12 w-12 shrink-0 rounded-lg border"
+            className="h-12 w-11 shrink-0 rounded-none border-0 border-l border-black/15"
             style={{
-              color: 'var(--theme-sidebar-text)',
-              borderColor: 'var(--theme-border)',
-              backgroundColor: 'rgba(0,0,0,0.12)',
+              color: '#010101',
+              backgroundColor: 'var(--theme-accent)',
             }}
             onClick={openPolicyPresetDialog}
             title="New chat policy preset"
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--theme-accent-hover)'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'var(--theme-accent)'}
           >
-            <MoreVertical className="h-4 w-4" />
+            <ChevronDown className="h-4 w-4" />
           </Button>
         </div>
       </div>
@@ -690,16 +782,48 @@ export default function ChatSidebar({ activeSessionId, executingSessionIds = [],
           <DialogHeader>
             <DialogTitle>New Chat Policy Preset</DialogTitle>
             <DialogDescription>
-              Optional JSON policy applied automatically after a new chat is created. If empty/cleared, new chats use your default policy.
+              Optional policy applied automatically after a new chat is created. If cleared, new chats use your default policy.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <Textarea
-              value={policyPresetText}
-              onChange={(e) => setPolicyPresetText(e.target.value)}
-              className="min-h-[220px] font-mono text-xs"
-              placeholder='{"armory": {"confirm_tools": true}, "memory": {"enabled": true}}'
-            />
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-1 rounded-lg border border-gray-200 bg-gray-100 p-1">
+              {(["form", "json"] as const).map((mode) => (
+                <Button key={mode} size="sm" variant="ghost" className={`h-8 capitalize ${policyPresetMode === mode ? "bg-white shadow-sm" : ""}`} onClick={() => selectPolicyPresetMode(mode)}>
+                  {mode}
+                </Button>
+              ))}
+            </div>
+            {policyPresetMode === "json" ? (
+              <Textarea
+                value={policyPresetText}
+                onChange={(e) => setPolicyPresetText(e.target.value)}
+                className="min-h-[220px] font-mono text-xs"
+                placeholder='{"armory": {"confirm_tools": true}, "memory": {"enabled": true}}'
+              />
+            ) : (
+              <div className="max-h-[55vh] space-y-4 overflow-y-auto pr-1 text-sm">
+                <section className="space-y-2 rounded-lg border border-gray-200 p-3">
+                  <h3 className="font-semibold">Armory</h3>
+                  <label className="flex items-center gap-2"><Checkbox checked={policyPresetForm.confirmTools} onCheckedChange={(checked) => setPolicyPresetForm((form) => ({ ...form, confirmTools: !!checked }))} />Require confirmation before using tools</label>
+                </section>
+                <section className="space-y-3 rounded-lg border border-gray-200 p-3">
+                  <h3 className="font-semibold">Memory</h3>
+                  <label className="flex items-center gap-2"><Checkbox checked={policyPresetForm.memoryEnabled} onCheckedChange={(checked) => setPolicyPresetForm((form) => ({ ...form, memoryEnabled: !!checked }))} />Enable memory</label>
+                  <label className="flex items-center gap-2"><Checkbox checked={policyPresetForm.confirmBeforeExtracting} onCheckedChange={(checked) => setPolicyPresetForm((form) => ({ ...form, confirmBeforeExtracting: !!checked }))} />Confirm before extracting memory</label>
+                  <label className="flex items-center gap-2"><Checkbox checked={policyPresetForm.allowAdminPromotion} onCheckedChange={(checked) => setPolicyPresetForm((form) => ({ ...form, allowAdminPromotion: !!checked }))} />Allow admin promotion</label>
+                  {(["read", "write", "promote"] as const).map((field) => (
+                    <fieldset key={field} className="space-y-1.5">
+                      <legend className="text-xs font-semibold capitalize">{field} scopes</legend>
+                      <div className="grid grid-cols-3 gap-2">
+                        {(field === "promote" ? ["TENANT", "AGENT"] : ["USER", "TENANT", "AGENT"]).map((scope) => (
+                          <label key={`${field}:${scope}`} className="flex items-center gap-1.5 text-xs"><Checkbox checked={policyPresetForm[field].includes(scope)} onCheckedChange={(checked) => togglePresetScope(field, scope, !!checked)} />{scope}</label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  ))}
+                </section>
+              </div>
+            )}
             {policyPresetError && <p className="text-xs text-red-600">{policyPresetError}</p>}
             <div className="flex items-center justify-between gap-2 pt-1">
               <Button
