@@ -3,6 +3,7 @@ from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
+from src.config import settings
 
 
 def merge_step_results(left: list[dict], right: list[dict]) -> list[dict]:
@@ -25,7 +26,7 @@ class AgentConfig(BaseModel):
     )
     # Add any feature flags or environment limits here
     max_loops: int = Field(
-        default=50, 
+        default=settings.max_loops,
         description="Max cycles the planner/executor can perform per question."
     )
     max_plan_steps: int = Field(
@@ -49,6 +50,10 @@ class PlanExecuteState(TypedDict):
 
     # FIFO window of tool/subagent results visible to the agent (budgeted tokens)
     context_memory: Dict[str, Any]
+
+    # Compact ledger of recent context-select windows and loop summary metadata.
+    context_selection_history: List[dict[str, Any]]
+    context_selection_summary: Dict[str, Any]
 
     # Context loaded at the very beginning of the thread (User memories, MCP connections)
     preloaded_context: Dict[str, Any]

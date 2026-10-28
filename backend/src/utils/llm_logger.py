@@ -6,7 +6,8 @@ Two responsibilities, both driven from `src/models/llm_client.py`:
    record carrying the real provider `usage`, the gateway-reported cost, the
    raw response body, and the session identity it happened under. Records fan
    out to two sinks:
-      - `logs/llm/{agent_id}.jsonl` — one line per call, segregated by agent.
+      - `logs/llm/{timestamp}_{agent_id}.jsonl` — one line per call,
+        segregated by agent.
        Reuses the writer thread in `agent_logger` rather than starting a second
        one, so the existing "never block the agent on a disk write" guarantee
        applies here too.
@@ -37,6 +38,8 @@ from typing import Any, Optional
 from src.utils.agent_logger import (
     DEFAULT_MAX_FIELD_CHARS,
     _ensure_writer_started,
+    _filename_timestamp,
+    _log_filename,
     _log_queue,
     _safe_agent_id,
     get_session_logger,
@@ -55,6 +58,7 @@ _db_queue: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=_DB_QUEUE_MAX_SIZ
 _db_thread: threading.Thread | None = None
 _db_thread_lock = threading.Lock()
 _table_ready = False
+_llm_files: dict[str, str] = {}
 
 _INSERT_SQL = """
 INSERT INTO llm_calls (
@@ -191,7 +195,7 @@ def current_session_ids() -> dict[str, str]:
     """Agent identity from the ContextVar-bound logger.
 
     Falls back to agent_id="unbound" for scripts and tests —
-    those calls still get recorded, just into logs/llm/unbound.jsonl.
+    those calls still get recorded, just into logs/llm/{timestamp}_unbound.jsonl.
     """
     try:
         session = get_session_logger()
@@ -283,7 +287,17 @@ def _logs_dir() -> Path:
 
 
 def _write_file(record: dict[str, Any]) -> None:
-    path = _logs_dir() / f"{_safe_agent_id(record.get('agent_id', ''))}.jsonl"
+    agent_key = _safe_agent_id(str(record.get("agent_id", "") or ""))
+    session = get_session_logger()
+    if session is not None and _safe_agent_id(session.agent_id) == agent_key:
+        filename = _log_filename(agent_key, ts_prefix=session.file_ts_prefix)
+        _llm_files[agent_key] = filename
+    else:
+        filename = _llm_files.get(agent_key)
+        if filename is None:
+            filename = _log_filename(agent_key, ts_prefix=_filename_timestamp())
+            _llm_files[agent_key] = filename
+    path = _logs_dir() / filename
     line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
     _ensure_writer_started()
     try:

@@ -113,6 +113,39 @@ def test_parse_plan_serializes_context_loads_and_replans_before_finish():
     assert [phase["steps"][0]["id"] for phase in phases] == ["tokyo", "dubai"]
 
 
+def test_parse_plan_rejects_repeated_context_window_when_loop_detected():
+    raw = {
+        "phases": [
+            {
+                "sequence": 1,
+                "steps": [
+                    {
+                        "id": "s1",
+                        "action": "context_select",
+                        "name": "",
+                        "task": "reload",
+                        "parameters": {"key": "tool_1", "from_token": 0, "to_token": 100},
+                        "uses": [],
+                        "child_calls": [],
+                    }
+                ],
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="context_select loop detected"):
+        parse_plan(
+            json.dumps(raw),
+            max_plan_steps=2,
+            resources=set(),
+            context_selection_summary={
+                "loop_detected": True,
+                "repeated_windows": [
+                    {"key": "tool_1", "from_token": 0, "to_token": 100, "count": 4}
+                ],
+            },
+        )
+
+
 def test_parse_plan_reports_empty_or_invalid_json_cleanly():
     tools = {"first"}
     with pytest.raises(ValueError, match="steps_json is empty"):

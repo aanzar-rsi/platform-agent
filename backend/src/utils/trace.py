@@ -22,6 +22,7 @@ _context: ContextVar[dict[str, Any]] = ContextVar("agent_trace_context", default
 _CLIENT_ROOT = Path(__file__).resolve().parents[2]
 _TRACE_DIR = Path(os.environ.get("EVA_TRACE_LOG_DIR") or (_CLIENT_ROOT / "logs" / "traces"))
 _TRACE_LOCK = threading.Lock()
+_TRACE_FILES: dict[str, Path] = {}
 _TRACE_STDOUT = {"1", "true", "yes", "on"}
 _ids = ("request_id", "agent_id", "execution_id", "session_id", "owner_id",
         "owner_type", "tenant_id", "parent_agent_id", "child_agent_id")
@@ -114,9 +115,17 @@ def _safe_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip()) or "unbound"
 
 
+def _filename_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
 def _trace_path(ids: dict[str, Any]) -> Path:
-    key = str(ids.get("agent_id") or "unbound")
-    return _TRACE_DIR / f"{_safe_id(key)}.json"
+    key = _safe_id(str(ids.get("agent_id") or "unbound"))
+    path = _TRACE_FILES.get(key)
+    if path is None:
+        path = _TRACE_DIR / f"{_filename_timestamp()}_{key}.json"
+        _TRACE_FILES[key] = path
+    return path
 
 
 def _persist(record: dict[str, Any]) -> None:

@@ -2,7 +2,7 @@
 Per-chat agent session logger.
 
 Binds via ContextVar (like token_stream) and appends structured JSONL events
-to backend/logs/{agent_id}.jsonl. All public APIs soft-fail and never raise
+to backend/logs/{timestamp}_{agent_id}.jsonl. All public APIs soft-fail and never raise
 into the agent loop.
 
 Writes are handed off to a single background writer thread instead of being
@@ -100,9 +100,17 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _filename_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
 def _safe_agent_id(agent_id: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", (agent_id or "").strip())
     return cleaned or "unknown"
+
+
+def _log_filename(agent_id: str, *, ts_prefix: str | None = None) -> str:
+    return f"{ts_prefix or _filename_timestamp()}_{_safe_agent_id(agent_id)}.jsonl"
 
 
 def truncate_value(value: Any, max_chars: int = DEFAULT_MAX_FIELD_CHARS) -> Any:
@@ -140,7 +148,8 @@ class SessionLogger:
         self.session_id = session_id or ""
         self.logs_dir = Path(logs_dir) if logs_dir else LOGS_DIR
         self.max_field_chars = max_field_chars
-        self.path = self.logs_dir / f"{_safe_agent_id(agent_id)}.jsonl"
+        self.file_ts_prefix = _filename_timestamp()
+        self.path = self.logs_dir / _log_filename(agent_id, ts_prefix=self.file_ts_prefix)
 
     def log(self, event: str, payload: dict[str, Any] | None = None) -> None:
         try:

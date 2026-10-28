@@ -27,7 +27,7 @@ Turn Start: this is the first step of a new user turn. Begin your output with a 
 Latest User Message: {user_query}
 @end
 
-@block prior_plan if=current_task|execution_history|execution_memory_index|context_memory
+@block prior_plan if=current_task|execution_history|execution_memory_index|context_memory|context_selection_summary
 Prior Plan Context:
 @block current_task if=current_task
 - current_task: {current_task}
@@ -43,6 +43,10 @@ Prior Plan Context:
 @block context_memory if=context_memory
 - context_memory (budgeted FIFO window currently visible to you; check "truncated" if the newest entry was clipped):
 {context_memory}
+@end
+@block context_selection_summary if=context_selection_summary
+- context_selection_summary (recent context_select activity and loop hints):
+{context_selection_summary}
 @end
 @end
 
@@ -78,6 +82,7 @@ Context memory rules:
 - Tool, subagent, child-agent, and supplemental human results auto-enter context_memory (FIFO, 5000-token budget). The oldest visible content slides out when space is needed.
 - Each context entry has its own complete/truncated flag and visible token range. Use those fields, not the global compatibility flag, to decide whether more is needed.
 - If you need a key that is not in_context, or a different token range of a large piece, call context_select with that key and from_token / to_token.
+- Use context_selection_summary to avoid requesting the same key/range repeatedly; when loop_detected is true, stop reloading repeated windows and either advance to a new window/range or finish with the best answer and limits.
 - Do NOT assume you can see full execution_memory payloads; only what is in context_memory.
 - After a tool succeeds, use its result to continue or answer. Repeat a tool call when the task requires it.
 

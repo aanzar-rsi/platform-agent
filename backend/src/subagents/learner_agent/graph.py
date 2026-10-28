@@ -33,7 +33,7 @@ learner_app = _workflow.compile()
 def learn_session(agent_id: str, *, uid: str = "", checkpoint_id: str | None = None) -> dict[str, Any]:
     """
     Run the learner graph for one chat. Soft-fails: returns status dict, never raises.
-    Events are appended to the same logs/{agent_id}.jsonl as the main agent.
+    Events are appended to the same logs/{timestamp}_{agent_id}.jsonl as the main agent.
 
     `checkpoint_id`, when given, learns from that specific branch tip instead
     of the thread's latest checkpoint — lets the idle watcher cover every

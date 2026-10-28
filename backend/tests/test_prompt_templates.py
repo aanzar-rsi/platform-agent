@@ -39,13 +39,13 @@ TEMPLATES = {
     "agentnode": (_MAIN, {
         "tools", "subagents", "user_query", "conversation",
         "turn_start", "learned_experiences", "current_task", "execution_history",
-        "execution_memory_index", "context_memory", "preloaded_context",
+        "execution_memory_index", "context_memory", "context_selection_summary", "preloaded_context",
         "persona", "constraints", "user_preferences",
     }),
     "fast_agent": (_MAIN, {"persona", "user_query", "conversation", "learned_experiences"}),
     "planner_agent": (_MAIN, {
         "persona", "user_query", "conversation", "current_task", "execution_history",
-        "execution_memory_index", "context_memory", "constraints", "armory", "max_plan_steps", "child_mode",
+        "execution_memory_index", "context_memory", "context_selection_summary", "constraints", "armory", "max_plan_steps", "child_mode",
         "planner_error", "learned_experiences",
     }),
     "extract_memory_chunks": (_LEARNER, {
@@ -154,6 +154,7 @@ RICH = dict(
     execution_history=[{"step": 1, "type": "tool", "name": "read_file", "status": "ok"}],
     execution_memory_index=[{"key": "tool_1", "tokens": 8200, "in_context": True}],
     context_memory={"budget_tokens": 5000, "used_tokens": 2100, "truncated": False},
+    context_selection_summary={"selection_count": 3, "loop_detected": False},
     learned_experiences="1. Prefer read_file first",
 )
 

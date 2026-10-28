@@ -137,3 +137,22 @@ def test_runtime_handles_graph_recursion_limit_without_exception_log(monkeypatch
     )
     exception_log.assert_not_called()
     assert completed == [("failed", None, "GraphRecursionError")]
+
+
+def test_runtime_reports_configured_default_recursion_limit(monkeypatch):
+    from langgraph.errors import GraphRecursionError
+    from src.config import settings
+
+    writer = _Writer()
+    monkeypatch.setattr(settings, "max_loops", 500)
+    monkeypatch.setattr("api.services.agent_runtime.get_agent_app", lambda: object())
+    monkeypatch.setattr("src.utils.agent_logger.log_error", lambda **kwargs: None)
+
+    def fake_run_turn(*args, **kwargs):
+        raise GraphRecursionError("Recursion limit reached")
+        yield
+
+    monkeypatch.setattr("src.utils.postgres_checkpointer.run_turn", fake_run_turn)
+    AgentRuntime().run_turn(agent_id="agent-parent", owner_id="u1", query="loop", event_writer=writer)
+    error = next(event for event in writer.events if event["type"] == "run.error")
+    assert "500-step execution limit" in error["payload"]["message"]

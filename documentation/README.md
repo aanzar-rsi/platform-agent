@@ -8,6 +8,8 @@ This folder contains developer-facing documentation for the v2 codebase.
 - [`backend-codebase.md`](backend-codebase.md) — backend architecture and subsystem details.
 - [`backend-api.md`](backend-api.md) — backend HTTP/WebSocket API reference.
 - [`frontend-app.md`](frontend-app.md) — frontend architecture and conventions.
+- [`layer-dependencies.md`](layer-dependencies.md) — permitted and prohibited cross-layer dependencies.
+- [`component-dependency-diagram.md`](component-dependency-diagram.md) — component and dependency diagram.
 - [`drawio-schematic-blueprint.md`](drawio-schematic-blueprint.md) — draw.io sheet blueprint for architecture schematics.
 
 ## Conventions

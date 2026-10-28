@@ -197,6 +197,7 @@ def _validate_planner_response(state: dict, config=None) -> dict:
                 batch,
                 max_plan_steps=int(configurable.get("max_plan_steps") or 8),
                 resources={(item["type"], item["name"]) for item in state.get("planner_resources", [])},
+                context_selection_summary=state.get("context_selection_summary") or {},
             )
             execution_id = str(configurable.get("execution_id") or "execution")
             for phase in planned:
@@ -215,6 +216,18 @@ def _validate_planner_response(state: dict, config=None) -> dict:
         accepted = _accept_action(state, next_step, config)
         return {**update, **accepted, "planner_response": "", "planner_mode": False, "planner_error": {}}
     except (ValueError, TypeError) as exc:
+        if "context_select loop detected" in str(exc):
+            message = (
+                "Planner requested a repeated context window after loop detection. "
+                "Stopping to prevent another context-selection loop."
+            )
+            accepted = _accept_action(state, {"action": "finish", "answer": message}, config)
+            return {
+                "planner_response": "",
+                "planner_mode": False,
+                "planner_error": {"stage": "planner_validation", "message": str(exc)},
+                **accepted,
+            }
         prior_attempt = 0
         if isinstance(state.get("planner_error"), dict):
             try:

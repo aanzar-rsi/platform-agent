@@ -272,7 +272,10 @@ def output_security_gate_node(state: dict, config=None) -> dict:
 
     update = {
         "executor_output": {}, "execution_history": history, "execution_memory": memory,
-        "context_memory": context, "messages": messages, "output_events": events,
+        "context_memory": context,
+        "context_selection_history": state.get("context_selection_history") or [],
+        "context_selection_summary": state.get("context_selection_summary") or {},
+        "messages": messages, "output_events": events,
         "next_step": {}, "dispatch_target": "",
     }
     if planned:

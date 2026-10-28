@@ -1,5 +1,15 @@
 # High-Level Changelog
 
+- 2026-10-28T08:39:24+00:00 — Updated chat execution cards so child-agent calls are visually distinct from tool calls with a larger highlighted rectangle and explicit guidance text prompting users to click to view child-agent execution details.
+
+- 2026-10-28T08:14:25+00:00 — Added context-selection loop resilience in the backend planner pipeline: the agent now tracks recently requested context windows, surfaces loop hints to planning prompts, blocks repeated looped window requests, and exits with a clear limit message instead of spinning indefinitely.
+
+- 2026-10-28T07:36:05+00:00 — Updated backend trace, agent-session, and LLM log file naming so generated filenames now begin with a UTC timestamp prefix, making files sortable by creation time while preserving existing agent-based identifiers.
+
+- 2026-10-28T05:20:36+00:00 — Documented current permitted and prohibited cross-layer dependencies and added a component/dependency diagram for the frontend, API, agent, persistence, learner, and external integrations.
+
+- 2026-10-28T05:12:11+00:00 — Unified the agent execution limit across API, CLI, and child runs: `MAX_LOOPS` from backend settings is now the default when no user preference is saved, and execution-limit warnings report the effective value.
+
 - 2026-10-27T16:46:03+00:00 — Completed child-run stability fixes so parent execution no longer fails when a child is still running at collection time: collection now remains in a running/pending state, retries cleanly, and preserves terminal child failures; also aligned child timeout runtime to the approved 10-minute window and tightened child-card/task UI behavior and context-memory prompt semantics.
 
 - 2026-10-27T09:09:58+00:00 — Reduced backend startup latency by removing the unconditional full memory-index rebuild from API readiness; interrupted indexing work now resumes in the background, with startup-phase timing logs.

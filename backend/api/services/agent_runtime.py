@@ -418,7 +418,9 @@ class AgentRuntime:
             outcome = "failed"
             outcome_error = type(exc).__name__
             if isinstance(exc, GraphRecursionError):
-                max_loops = int((runtime or {}).get("max_loops", 50))
+                from src.config import settings
+
+                max_loops = settings.resolve_max_loops(runtime)
                 error_message = (
                     f"The agent stopped after reaching its {max_loops}-step execution limit. "
                     "Try simplifying the request or increase Max loops in Settings."

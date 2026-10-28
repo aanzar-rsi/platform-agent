@@ -193,6 +193,7 @@ def agentnode_prompt_loader(
     execution_history: list[dict[str, Any]],
     execution_memory_index: list[dict[str, Any]],
     context_memory: dict[str, Any],
+    context_selection_summary: dict[str, Any] | None = None,
     *,
     conversation: str = "",
     current_task: str = "",
@@ -239,6 +240,7 @@ def agentnode_prompt_loader(
         "execution_history": execution_history,
         "execution_memory_index": execution_memory_index,
         "context_memory": context_memory,
+        "context_selection_summary": context_selection_summary or {},
         "preloaded_context": preloaded,
     }
     return load_prompt("agentnode", context)
@@ -291,6 +293,7 @@ def planner_agent_prompt_loader(
     execution_history: list[dict[str, Any]],
     execution_memory_index: list[dict[str, Any]],
     context_memory: dict[str, Any],
+    context_selection_summary: dict[str, Any] | None = None,
     conversation: str = "",
     current_task: str = "",
     max_plan_steps: int = 8,
@@ -307,6 +310,7 @@ def planner_agent_prompt_loader(
         "execution_history": execution_history,
         "execution_memory_index": execution_memory_index,
         "context_memory": context_memory,
+        "context_selection_summary": context_selection_summary or {},
         "armory": _armory_text(tools=tools, subagents=subagents),
         "max_plan_steps": max(1, int(max_plan_steps or 1)),
         "child_mode": child_mode,

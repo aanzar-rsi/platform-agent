@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     # ── LLM call logging / mock replay ─────────────────────────────────────
     # Every call through src/models/llm_client.py is recorded to
-    # logs/llm/{agent_id}.jsonl and the `llm_calls` Postgres table.
+    # logs/llm/{timestamp}_{agent_id}.jsonl and the `llm_calls` Postgres table.
     llm_call_log_enabled: bool = Field(default=True, validation_alias="LLM_CALL_LOG_ENABLED")
     llm_call_log_to_db: bool = Field(default=True, validation_alias="LLM_CALL_LOG_TO_DB")
     # When on, an identical earlier call (same model + system prompt + prompt +
@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # ── Agent behaviour ────────────────────────────────────────────────────
     agent_log_enabled: bool = Field(default=True, validation_alias="AGENT_LOG_ENABLED")
     max_loops: int = Field(default=500, validation_alias="MAX_LOOPS")
+
+    def resolve_max_loops(self, runtime: dict | None = None) -> int:
+        """Use a saved per-user limit when supplied; otherwise use MAX_LOOPS."""
+        return int((runtime or {}).get("max_loops", self.max_loops))
 
     # ── Experience / learner ───────────────────────────────────────────────
     experience_enabled: bool = Field(default=True, validation_alias="EXPERIENCE_ENABLED")

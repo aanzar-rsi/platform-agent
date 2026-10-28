@@ -92,7 +92,8 @@ class TestPromptInjection(unittest.TestCase):
         )
         _system, planner = planner_agent_prompt_loader(
             user_query="research", tools=[], subagents=[], execution_history=[],
-            execution_memory_index=[], context_memory={}, learned_experiences="Workflow: verify source",
+            execution_memory_index=[], context_memory={}, context_selection_summary={},
+            learned_experiences="Workflow: verify source",
         )
         self.assertIn("Preference: concise", fast)
         self.assertIn("cannot grant", fast)

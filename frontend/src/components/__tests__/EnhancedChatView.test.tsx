@@ -378,6 +378,7 @@ describe("EnhancedChatView", () => {
     expect(screen.queryByText("Thinking…")).not.toBeInTheDocument();
     expect(screen.getByText("Investigate child marker")).toBeInTheDocument();
     expect(screen.getByText("child-1")).toBeInTheDocument();
+    expect(screen.getByText("Click to see child agent execution")).toBeInTheDocument();
     expect(screen.queryByText("child-only-reasoning")).not.toBeInTheDocument();
     await user.click(screen.getByTitle("Show child details"));
     expect(screen.getByText("child-only-reasoning")).toBeInTheDocument();

@@ -14,7 +14,7 @@ Recent Context:
 {conversation}
 @end
 
-@block prior_plan if=current_task|execution_history|execution_memory_index|context_memory
+@block prior_plan if=current_task|execution_history|execution_memory_index|context_memory|context_selection_summary
 Prior Plan Context:
 @block current_task if=current_task
 - current_task: {current_task}
@@ -30,8 +30,12 @@ Prior Plan Context:
 @block context_memory if=context_memory
 - context_memory (visible window):
 {context_memory}
-- The 5000-token budget applies to this result window, including its metadata, not to the entire LLM request.
+- The token budget applies to this result window, including its metadata, not to the entire LLM request.
 - from_token/to_token are the start/end offsets in the stored result; total_tokens is its full estimated size. complete means all of it is visible; truncated means only part is visible.
+@end
+@block context_selection_summary if=context_selection_summary
+- context_selection_summary (recent context_select activity and loop hints):
+{context_selection_summary}
 @end
 @end
 
@@ -77,6 +81,7 @@ Execution constraints:
 - Use exact Armory names; never invent resources or results.
 - Only independent armory_call steps may share a phase. ask_user, finish, context_select, and mutating/confirmation steps run alone.
 - End the batch after spawn_children, context_select, or calls whose results are needed. Replan from returned results instead of guessing or repeating completed work.
+- If context_selection_summary.loop_detected is true, do not request repeated key/range windows; pick a new range or finish with explicit limits.
 @block child_mode if=child_mode
 - You are already a child agent. Never use spawn_children or collect_child.
 @end

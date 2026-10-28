@@ -110,7 +110,9 @@ def test_trace_persists_session_json(tmp_path):
         reset(token)
         trace_module._TRACE_DIR = original
 
-    path = tmp_path / "agent_1.json"
+    matches = list(tmp_path.glob("*_agent_1.json"))
+    assert len(matches) == 1
+    path = matches[0]
     assert path.exists()
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["session_id"] == "sess:1"

@@ -102,7 +102,13 @@ def _escape_unescaped_quotes_in_json_strings(text: str) -> str:
     return "".join(out)
 
 
-def parse_plan(raw: str, *, max_plan_steps: int, resources: set[tuple[str, str]]) -> list[dict]:
+def parse_plan(
+    raw: str,
+    *,
+    max_plan_steps: int,
+    resources: set[tuple[str, str]],
+    context_selection_summary: dict[str, Any] | None = None,
+) -> list[dict]:
     """Reject the entire plan if any step is invalid or exceeds the runtime limit."""
     if max_plan_steps < 1:
         raise ValueError("max_plan_steps must be positive")
@@ -328,4 +334,31 @@ def parse_plan(raw: str, *, max_plan_steps: int, resources: set[tuple[str, str]]
                 "edit_file", "execute_bash", "execute_powershell", "execute_python_script",
             }:
                 raise ValueError("confirmation-requiring tools must run alone")
+
+    seen_windows: set[tuple[str, int, int | None]] = set()
+    for phase in plan.phases:
+        for step in phase.steps:
+            if step.action != "context_select":
+                continue
+            from_token = int(step.parameters.get("from_token") or 0)
+            to_token = step.parameters.get("to_token")
+            to_token = None if to_token is None else int(to_token)
+            signature = (str(step.parameters.get("key") or ""), from_token, to_token)
+            if signature in seen_windows:
+                raise ValueError("duplicate context_select window in plan")
+            seen_windows.add(signature)
+
+    loop_summary = context_selection_summary if isinstance(context_selection_summary, dict) else {}
+    if loop_summary.get("loop_detected"):
+        repeated_signatures = {
+            (
+                str(item.get("key") or ""),
+                int(item.get("from_token") or 0),
+                None if item.get("to_token") is None else int(item.get("to_token")),
+            )
+            for item in (loop_summary.get("repeated_windows") or [])
+            if isinstance(item, dict)
+        }
+        if repeated_signatures and any(signature in repeated_signatures for signature in seen_windows):
+            raise ValueError("context_select loop detected: requested repeated window")
     return plan.model_dump()["phases"]

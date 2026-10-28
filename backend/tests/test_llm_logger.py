@@ -125,9 +125,11 @@ class TestRecordLlmCall(unittest.TestCase):
                 record_llm_call(build_record(**_record_kwargs(**(record_overrides or {}))))
                 reset_session_logger(token)
             self.assertTrue(flush_pending_llm_calls(timeout=5.0), "sinks did not drain")
-            path = tmp_path / "llm" / f"{agent_id}.jsonl"
-            if not path.exists():
+            matches = list((tmp_path / "llm").glob(f"*_{agent_id}.jsonl"))
+            if not matches:
                 return None
+            self.assertEqual(len(matches), 1)
+            path = matches[0]
             return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
     def test_writes_one_full_record_to_its_own_session_file(self):

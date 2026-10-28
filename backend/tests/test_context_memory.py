@@ -25,9 +25,11 @@ from src.agent.memory import (
     build_execution_memory_index,
     count_content_tokens,
     empty_context_memory,
+    record_context_selection,
     serialize_content,
     slice_by_tokens,
     slim_execution_history,
+    summarize_context_selection_history,
     update_context_memory,
 )
 from src.agent.nodes.agentnode import _format_conversation, _latest_human_content, _parse_response, _run_stream
@@ -405,6 +407,52 @@ class TestContextSelectorNode(unittest.TestCase):
         self.assertEqual(len([e for e in entries if e["key"] == "tool_1"]), 1)
         self.assertEqual(entries[-1]["from_token"], 80)
 
+    def test_records_selection_history_and_summary(self):
+        out = context_selector_node(self._state(next_step={"key": "tool_1", "from_token": 10, "to_token": 20}))
+        self.assertIn("context_selection_history", out)
+        self.assertEqual(out["context_selection_history"][-1]["key"], "tool_1")
+        self.assertEqual(out["context_selection_summary"]["selection_count"], 1)
+        self.assertFalse(out["context_selection_summary"]["loop_detected"])
+        self.assertEqual(out["execution_history"][-1]["type"], "context_select")
+
+
+class TestContextSelectionSummary(unittest.TestCase):
+    def test_loop_summary_detects_two_window_ping_pong(self):
+        history = []
+        for _ in range(3):
+            history, _ = record_context_selection(
+                history,
+                key="tool_1",
+                from_token=0,
+                to_token=100,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=300,
+            )
+            history, summary = record_context_selection(
+                history,
+                key="tool_1",
+                from_token=100,
+                to_token=200,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=300,
+            )
+        self.assertTrue(summary["loop_detected"])
+        self.assertIn("repeated", summary["reason"])
+        self.assertEqual(summary["selection_count"], 6)
+
+    def test_loop_summary_detects_same_window_repeated(self):
+        summary = summarize_context_selection_history(
+            [
+                {"key": "tool_1", "from_token": 0, "to_token": 50, "loaded_tokens": 50, "found": True},
+                {"key": "tool_1", "from_token": 0, "to_token": 50, "loaded_tokens": 50, "found": True},
+                {"key": "tool_1", "from_token": 0, "to_token": 50, "loaded_tokens": 50, "found": True},
+            ]
+        )
+        self.assertTrue(summary["loop_detected"])
+        self.assertIn("same context window", summary["reason"])
+
 
 class TestRouting(unittest.TestCase):
     def test_armory(self):
@@ -593,6 +641,7 @@ class TestPromptLoader(unittest.TestCase):
             execution_history=hist,
             execution_memory_index=index,
             context_memory=cm,
+            context_selection_summary={"selection_count": 1, "loop_detected": False},
             turn_start=False,
         )
         self.assertIn("execution_memory_index", user)
@@ -616,6 +665,7 @@ class TestPromptLoader(unittest.TestCase):
             execution_history=[],
             execution_memory_index=[],
             context_memory=empty_context_memory(),
+            context_selection_summary={},
             turn_start=True,
         )
         self.assertIn("session_intent", user)
@@ -701,6 +751,7 @@ class TestToonTokenSavings(unittest.TestCase):
             execution_history=slim_execution_history([]),
             execution_memory_index=index,
             context_memory=empty_context_memory(),
+            context_selection_summary={},
         )
         self.assertIn("[2]{key,type,name,task,total_tokens,in_context}:", user)
         self.assertNotIn('{\n  "key": "tool_1"', user)

@@ -402,6 +402,7 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
     has_child_history = any(entry.get("type") == "child_agent" for entry in execution_history)
     execution_memory = state.get("execution_memory", {})
     context_memory = state.get("context_memory") or empty_context_memory()
+    context_selection_summary = state.get("context_selection_summary") or {}
     preloaded = state.get("preloaded_context") or {}
 
     configurable = (config or {}).get("configurable") or {}
@@ -496,6 +497,7 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
             execution_history=slim_execution_history(execution_history),
             execution_memory_index=build_execution_memory_index(execution_memory, context_memory),
             context_memory=context_memory,
+            context_selection_summary=context_selection_summary,
             conversation=conversation_text,
             current_task=state.get("current_task", ""),
             max_plan_steps=int(configurable.get("max_plan_steps") or 8),
@@ -603,6 +605,36 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
                 },
             )
         ] + list(update.get("messages", []))
+
+    loop_summary = state.get("context_selection_summary") or {}
+    next_step = update.get("next_step") or {}
+    if loop_summary.get("loop_detected") and next_step.get("action") == "context_select":
+        key = str(next_step.get("key") or "")
+        from_token = _coerce_int(next_step.get("from_token"), 0) or 0
+        to_token = _coerce_int(next_step.get("to_token"), None)
+        repeated = {
+            (
+                str(item.get("key") or ""),
+                int(item.get("from_token") or 0),
+                None if item.get("to_token") is None else _coerce_int(item.get("to_token"), None),
+            )
+            for item in (loop_summary.get("repeated_windows") or [])
+            if isinstance(item, dict)
+        }
+        if (key, from_token, to_token) in repeated:
+            reason = loop_summary.get("reason") or "repeated context selection detected"
+            answer = (
+                "I could not complete this request because planning entered a repeated context-selection loop "
+                f"({reason}). I already loaded this result window multiple times. "
+                "Please try narrowing the request or ask me to continue from the next token window."
+            )
+            update.update(
+                current_task="finish",
+                next_step={"action": "finish", "answer": answer},
+                messages=[AIMessage(content=answer)],
+                planned_phases=[],
+                planned_phase_index=0,
+            )
 
     if execution_memory is not original_execution_memory and "execution_memory" not in update:
         update.update(execution_memory=execution_memory, context_memory=context_memory)

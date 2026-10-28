@@ -12,8 +12,9 @@ import toons
 
 from src.models.llm_client import count_tokens
 
-CONTEXT_MEMORY_BUDGET = 5000
+CONTEXT_MEMORY_BUDGET = 20000
 _CHARS_PER_TOKEN = 4
+CONTEXT_SELECTION_HISTORY_LIMIT = 48
 
 
 def empty_context_memory(budget: int = CONTEXT_MEMORY_BUDGET) -> dict[str, Any]:
@@ -171,6 +172,101 @@ def slim_execution_history(
             }
         )
     return slim
+
+
+def _window_signature(key: str, from_token: int, to_token: int | None) -> tuple[str, int, int | None]:
+    return (str(key or ""), int(from_token or 0), None if to_token is None else int(to_token))
+
+
+def summarize_context_selection_history(
+    selection_history: list[dict[str, Any]] | None,
+    *,
+    recent_limit: int = 8,
+) -> dict[str, Any]:
+    """Summarize recent context_select activity and detect obvious load loops."""
+    history = [
+        item for item in (selection_history or [])
+        if isinstance(item, dict) and item.get("key")
+    ]
+    if not history:
+        return {}
+
+    recent = history[-max(1, int(recent_limit)) :]
+    signatures = [
+        _window_signature(item.get("key", ""), item.get("from_token") or 0, item.get("to_token"))
+        for item in recent
+    ]
+
+    counts: dict[tuple[str, int, int | None], int] = {}
+    for sig in signatures:
+        counts[sig] = counts.get(sig, 0) + 1
+
+    repeated_windows = [
+        {"key": sig[0], "from_token": sig[1], "to_token": sig[2], "count": count}
+        for sig, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)
+        if count > 1
+    ]
+
+    loop_detected = False
+    reason = ""
+
+    most_repeated = max(counts.values()) if counts else 0
+    if most_repeated >= 3:
+        loop_detected = True
+        reason = "same context window requested repeatedly"
+
+    if not loop_detected and len(signatures) >= 6:
+        unique = list(dict.fromkeys(signatures))
+        alternating = all(signatures[index] != signatures[index - 1] for index in range(1, len(signatures)))
+        if len(unique) == 2 and alternating and min(counts[unique[0]], counts[unique[1]]) >= 3:
+            loop_detected = True
+            reason = "alternating between the same two context windows"
+
+    return {
+        "recent": [
+            {
+                "key": item.get("key", ""),
+                "from_token": int(item.get("from_token") or 0),
+                "to_token": item.get("to_token"),
+                "loaded_tokens": int(item.get("loaded_tokens") or 0),
+                "found": bool(item.get("found", True)),
+            }
+            for item in recent
+        ],
+        "repeated_windows": repeated_windows,
+        "loop_detected": loop_detected,
+        "reason": reason,
+        "selection_count": len(history),
+    }
+
+
+def record_context_selection(
+    selection_history: list[dict[str, Any]] | None,
+    *,
+    key: str,
+    from_token: int,
+    to_token: int | None,
+    found: bool,
+    loaded_tokens: int,
+    total_tokens: int,
+    task: str = "",
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Append one context_select event and return an updated loop summary."""
+    history = [item for item in (selection_history or []) if isinstance(item, dict)]
+    history.append(
+        {
+            "key": str(key or ""),
+            "from_token": int(from_token or 0),
+            "to_token": None if to_token is None else int(to_token),
+            "found": bool(found),
+            "loaded_tokens": int(loaded_tokens or 0),
+            "total_tokens": int(total_tokens or 0),
+            "task": str(task or ""),
+        }
+    )
+    if len(history) > CONTEXT_SELECTION_HISTORY_LIMIT:
+        history = history[-CONTEXT_SELECTION_HISTORY_LIMIT:]
+    return history, summarize_context_selection_history(history)
 
 
 def update_context_memory(
