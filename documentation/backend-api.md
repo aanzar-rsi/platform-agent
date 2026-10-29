@@ -20,7 +20,7 @@ Start the server **from `backend/`** (single worker required):
 
 ```bash
 # install once
-.venv/bin/pip install -r requirements.txt -r api/requirements.txt
+.venv/bin/pip install -r requirements.txt
 
 # run
 .venv/bin/python main.py

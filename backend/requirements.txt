@@ -39,9 +39,13 @@ langgraph-checkpoint-postgres>=2.0.0
 
 # Provides jwt.encode/decode and PyJWTError used by api/core.
 PyJWT>=2.9.0
-fastapi
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+httpx>=0.27.0
+argon2-cffi>=23.1.0
+cachetools>=5.3.0
+typing-extensions>=4.9.0
 mcp>=1.10,<2
 cryptography>=42.0.0
 
-# FastAPI app (also listed in api/requirements.txt)
-#   pip install -r api/requirements.txt
+# FastAPI app dependencies are consolidated here (single requirements file)

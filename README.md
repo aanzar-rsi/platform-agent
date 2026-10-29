@@ -27,7 +27,7 @@ From `backend/`:
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt -r api/requirements.txt
+.venv/bin/pip install -r requirements.txt
 ```
 
 ### 2) Frontend setup
