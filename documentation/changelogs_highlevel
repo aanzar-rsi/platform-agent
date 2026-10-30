@@ -1,5 +1,7 @@
 # High-Level Changelog
 
+- 2026-10-30T07:43:05+00:00 — Merged local first-time setup and degraded-startup improvements into `dev` alongside the remote single-file backend dependency update, retaining both branches' documentation history.
+
 - 2026-10-30T06:01:47+00:00 — Wired the new `scripts/firsttime_setup.py` into root quick-start documentation so first-run setup now includes a single guided DB + test-user bootstrap step before `./run_dev`.
 
 - 2026-10-30T05:57:58+00:00 — Added a single first-time setup script (`scripts/firsttime_setup.py`) that verifies prerequisites, provisions PostgreSQL schema, interactively creates/updates a test login user, and prints a full developer bring-up checklist.
