@@ -2,6 +2,14 @@
 
 This folder contains developer-facing documentation for the v2 codebase.
 
+## First-Time Setup
+
+- Run `backend/.venv/bin/python scripts/firsttime_setup.py` from repo root to:
+  - print/install checklist reminders,
+  - create/verify Postgres database + schema,
+  - prompt for and create/update a local test login user,
+  - print final bring-up checklist (`./run_dev`, login URL, live health URL).
+
 ## Core Docs
 
 - [`repo-structure.md`](repo-structure.md) — repository layout, responsibilities, and developer workflows.

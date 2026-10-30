@@ -36,7 +36,7 @@ function SsoButton({
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { signIn, isAuthenticated, isLoading: authBooting } = useAuth();
+  const { signIn, isAuthenticated, isLoading: authBooting, backendWarning } = useAuth();
 
   const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
@@ -135,6 +135,11 @@ export default function LoginPage() {
           </div>
 
           <form onSubmit={handleLogin} className="space-y-5">
+            {backendWarning ? (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                {backendWarning}
+              </div>
+            ) : null}
             <div className="space-y-2">
               <Label htmlFor="userId" className="text-[#171717]">Username or Email</Label>
               <Input

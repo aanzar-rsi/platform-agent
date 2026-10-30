@@ -43,6 +43,11 @@ def _chroma_available() -> bool:
         return False
 
 
+def chroma_status() -> bool:
+    """Return whether Chroma is reachable for memory indexing."""
+    return _chroma_available()
+
+
 def _id(prefix: str) -> str:
     return prefix + uuid.uuid4().hex
 

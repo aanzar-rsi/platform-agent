@@ -4,6 +4,7 @@ import { renderHook, act, waitFor } from "@testing-library/react";
 const loginMock = vi.fn();
 const logoutMock = vi.fn();
 const meMock = vi.fn();
+const healthLiveMock = vi.fn();
 const setAccessTokenMock = vi.fn();
 const getAccessTokenMock = vi.fn();
 const clearAuthStorageMock = vi.fn();
@@ -13,6 +14,9 @@ vi.mock("@/lib/api", () => ({
     login: (...args: any[]) => loginMock(...args),
     logout: (...args: any[]) => logoutMock(...args),
     me: (...args: any[]) => meMock(...args),
+  },
+  healthAPI: {
+    live: (...args: any[]) => healthLiveMock(...args),
   },
   setAccessToken: (...args: any[]) => setAccessTokenMock(...args),
   getAccessToken: (...args: any[]) => getAccessTokenMock(...args),
@@ -29,10 +33,12 @@ describe("useBackendAuth", () => {
     loginMock.mockReset();
     logoutMock.mockReset();
     meMock.mockReset();
+    healthLiveMock.mockReset();
     setAccessTokenMock.mockReset();
     getAccessTokenMock.mockReset();
     clearAuthStorageMock.mockReset();
     getAccessTokenMock.mockReturnValue(null);
+    healthLiveMock.mockResolvedValue({ ok: true, status: "ok", dependencies: { postgres: true }, warnings: [] });
   });
 
   it("boots unauthenticated when no token", async () => {
@@ -62,6 +68,15 @@ describe("useBackendAuth", () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.isAuthenticated).toBe(false);
     expect(clearAuthStorageMock).toHaveBeenCalledOnce();
+  });
+
+  it("marks backend unavailable when live probe fails", async () => {
+    healthLiveMock.mockRejectedValue(new Error("offline"));
+    const { useBackendAuth } = await import("@/hooks/use-backend-auth");
+    const { result } = renderHook(() => useBackendAuth());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    await waitFor(() => expect(result.current.backendAvailable).toBe(false));
+    expect(result.current.backendWarning).toContain("Backend is unreachable");
   });
 
   it("signIn stores token and user", async () => {

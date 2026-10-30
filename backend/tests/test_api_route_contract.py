@@ -21,6 +21,8 @@ def test_armory_agent_route_contract():
         ("GET", "/v1/agents/{agent_id}/analytics"),
         ("GET", "/v1/analytics"),
         ("GET", "/v1/memory"),
+        ("GET", "/v1/health"),
+        ("GET", "/v1/live"),
     }
     assert expected <= routes
 

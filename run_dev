@@ -5,6 +5,85 @@ root=$(cd "$(dirname "$0")" && pwd)
 backend_pid=""
 frontend_pid=""
 
+info() {
+  printf '[run_dev] %s\n' "$*"
+}
+
+warn() {
+  printf '[run_dev] WARNING: %s\n' "$*"
+}
+
+read_env_value() {
+  local key="$1"
+  local fallback="$2"
+  local file="$root/backend/.env"
+  if [ ! -f "$file" ]; then
+    printf '%s' "$fallback"
+    return
+  fi
+  local value=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "${key}="*)
+        value=${line#*=}
+        value=${value%$'\r'}
+        ;;
+    esac
+  done < "$file"
+  if [ -n "$value" ]; then
+    printf '%s' "$value"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+check_tcp() {
+  local host="$1"
+  local port="$2"
+  local timeout_s="${3:-1.5}"
+  python3 -c "import socket,sys; s=socket.socket(); s.settimeout(float(sys.argv[3])); s.connect((sys.argv[1], int(sys.argv[2]))); s.close()" "$host" "$port" "$timeout_s" >/dev/null 2>&1
+}
+
+preflight_checks() {
+  info "Running dependency preflight checks"
+
+  if [ ! -x "$root/backend/.venv/bin/python" ]; then
+    warn "Missing backend venv interpreter at backend/.venv/bin/python"
+    warn "Create it with: python3 -m venv backend/.venv && backend/.venv/bin/pip install -r backend/requirements.txt"
+  fi
+
+  if [ ! -d "$root/frontend/node_modules" ]; then
+    warn "frontend/node_modules not found; run 'cd frontend && npm install' if startup fails"
+  fi
+
+  local pghost
+  local pgport
+  pghost=$(read_env_value "PGHOST" "127.0.0.1")
+  pgport=$(read_env_value "PGPORT" "5432")
+
+  if check_tcp "$pghost" "$pgport" "1.2"; then
+    info "PostgreSQL reachable at $pghost:$pgport"
+  else
+    warn "PostgreSQL is not reachable at $pghost:$pgport"
+    warn "Backend will start in degraded mode; auth and data routes will return 503 until DB is up"
+  fi
+
+  local chroma_host
+  local chroma_port
+  chroma_host=$(read_env_value "MEMORY_CHROMA_HOST" "")
+  chroma_port=$(read_env_value "MEMORY_CHROMA_PORT" "8000")
+  if [ -n "$chroma_host" ]; then
+    if check_tcp "$chroma_host" "$chroma_port" "1.2"; then
+      info "Chroma host reachable at $chroma_host:$chroma_port"
+    else
+      warn "Configured Chroma host is unreachable at $chroma_host:$chroma_port"
+      warn "Memory indexing/search may be partially unavailable; backend will continue"
+    fi
+  else
+    info "No MEMORY_CHROMA_HOST configured; backend will use local persistent Chroma"
+  fi
+}
+
 cleanup() {
   trap - EXIT INT TERM
   [ -z "$frontend_pid" ] || kill "$frontend_pid" 2>/dev/null || true
@@ -13,6 +92,8 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM
+
+preflight_checks
 
 (cd "$root/backend" && .venv/bin/python main.py) &
 backend_pid=$!

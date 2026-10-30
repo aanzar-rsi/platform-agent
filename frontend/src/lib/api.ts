@@ -236,6 +236,15 @@ export interface HealthResponse {
   agent_ready: boolean;
   active_ws: number;
   active_runs: number;
+  dependencies: Record<string, boolean>;
+  warnings: string[];
+}
+
+export interface LiveResponse {
+  ok: boolean;
+  status: string;
+  dependencies: Record<string, boolean>;
+  warnings: string[];
 }
 
 export interface AnalyticsTokenBreakdown {
@@ -938,8 +947,8 @@ export const healthAPI = {
     const response = await apiClient.get<HealthResponse>('/health');
     return response.data;
   },
-  live: async () => {
-    const response = await apiClient.get('/live');
+  live: async (): Promise<LiveResponse> => {
+    const response = await apiClient.get<LiveResponse>('/live');
     return response.data;
   },
   info: async () => ({ name: 'PlatformAgent Agent API', version: 'v1' }),

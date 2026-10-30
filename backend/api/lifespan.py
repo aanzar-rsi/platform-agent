@@ -10,6 +10,7 @@ from api.core.config import get_settings
 from api.core.deps import get_repos
 from api.core.logging_setup import configure_logging
 from api.services.agent_runtime import ensure_client_path, get_agent_app
+from src.agent.kb import chroma_status
 
 logger = logging.getLogger(__name__)
 
@@ -39,36 +40,43 @@ async def lifespan(app):
     get_repos()
     from api.db.postgres import execute, fetch_one
 
+    db_ready = True
+    db_error = ""
     try:
         fetch_one("SELECT 1")
+        logger.info("Startup PostgreSQL check completed in %.2fs", time.monotonic() - started_at)
     except Exception as exc:
-        raise RuntimeError(
-            "PostgreSQL connection failed; check PGHOST, PGPORT, PGDATABASE, PGUSER, "
-            "and PGPASSWORD in backend/.env against the running database"
-        ) from exc
-    logger.info("Startup PostgreSQL check completed in %.2fs", time.monotonic() - started_at)
-
-    execute("ALTER TABLE agent_cores ADD COLUMN IF NOT EXISTS policy_ceiling JSONB")
-    execute("ALTER TABLE mcp_servers_catalog ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'")
-    execute("UPDATE agent_cores SET policy_ceiling = policy WHERE policy_ceiling IS NULL AND parent_agent_id IS NULL")
-    execute(
-        """
-        CREATE TABLE IF NOT EXISTS memory_extraction_requests (
-            request_id TEXT PRIMARY KEY,
-            owner_id UUID NOT NULL,
-            agent_id UUID NOT NULL,
-            checkpoint_id TEXT NOT NULL,
-            chunk_type TEXT NOT NULL,
-            state TEXT NOT NULL CHECK (state IN ('APPROVAL_PENDING', 'APPROVED', 'REJECTED', 'COMPLETED', 'SKIPPED')),
-            reviewed_by UUID,
-            reason TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        db_ready = False
+        db_error = str(exc)
+        logger.exception(
+            "PostgreSQL unavailable at startup; API will run degraded. "
+            "Check PGHOST, PGPORT, PGDATABASE, PGUSER, and PGPASSWORD in backend/.env"
         )
-        """
-    )
-    execute("CREATE INDEX IF NOT EXISTS idx_memory_extraction_owner_state ON memory_extraction_requests (owner_id, state, created_at DESC)")
-    logger.info("Startup schema checks completed in %.2fs", time.monotonic() - started_at)
+
+    if db_ready:
+        execute("ALTER TABLE agent_cores ADD COLUMN IF NOT EXISTS policy_ceiling JSONB")
+        execute("ALTER TABLE mcp_servers_catalog ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'")
+        execute("UPDATE agent_cores SET policy_ceiling = policy WHERE policy_ceiling IS NULL AND parent_agent_id IS NULL")
+        execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_extraction_requests (
+                request_id TEXT PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                agent_id UUID NOT NULL,
+                checkpoint_id TEXT NOT NULL,
+                chunk_type TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('APPROVAL_PENDING', 'APPROVED', 'REJECTED', 'COMPLETED', 'SKIPPED')),
+                reviewed_by UUID,
+                reason TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        execute("CREATE INDEX IF NOT EXISTS idx_memory_extraction_owner_state ON memory_extraction_requests (owner_id, state, created_at DESC)")
+        logger.info("Startup schema checks completed in %.2fs", time.monotonic() - started_at)
+    else:
+        logger.warning("Skipping startup schema checks because PostgreSQL is unavailable")
 
     async def cleanup_execution_events():
         while True:
@@ -87,11 +95,27 @@ async def lifespan(app):
 
     try:
         get_agent_app()
-        app.state.agent_ready = True
-        logger.info("Startup agent graph ready in %.2fs", time.monotonic() - started_at)
+        app.state.agent_ready = db_ready
+        if db_ready:
+            logger.info("Startup agent graph ready in %.2fs", time.monotonic() - started_at)
+        else:
+            logger.warning("Agent graph loaded but database is unavailable; keeping agent in degraded mode")
     except Exception:
         app.state.agent_ready = False
         logger.exception("Agent graph failed to initialize (API will start degraded)")
+
+    chroma_ready = chroma_status()
+    app.state.dependencies = {
+        "postgres": db_ready,
+        "chroma": chroma_ready,
+    }
+    warnings = []
+    if not db_ready:
+        warnings.append("postgres_unavailable")
+    if not chroma_ready:
+        warnings.append("chroma_unavailable")
+    app.state.startup_warnings = warnings
+    app.state.startup_error = db_error
 
     idle_watcher = None
     try:

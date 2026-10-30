@@ -55,3 +55,7 @@ backend/tests/*
 !backend/tests/test_startup.py
 requirements/
 graphify-out/
+text_render.py
+inputs.txt
+output.txt
+output1.txt

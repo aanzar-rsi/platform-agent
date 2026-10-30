@@ -1,5 +1,15 @@
 # High-Level Changelog
 
+- 2026-10-30T06:01:47+00:00 — Wired the new `scripts/firsttime_setup.py` into root quick-start documentation so first-run setup now includes a single guided DB + test-user bootstrap step before `./run_dev`.
+
+- 2026-10-30T05:57:58+00:00 — Added a single first-time setup script (`scripts/firsttime_setup.py`) that verifies prerequisites, provisions PostgreSQL schema, interactively creates/updates a test login user, and prints a full developer bring-up checklist.
+
+- 2026-10-30T05:28:03+00:00 — Added startup dependency resilience across `run_dev`, backend health/lifespan, and frontend auth bootstrap so missing PostgreSQL/Chroma now surfaces clear degraded-state warnings instead of hard startup crashes.
+
+- 2026-10-29T06:36:57+00:00 — Consolidated backend dependency installation to a single requirements file by removing the separate API requirements file and updating setup docs to install only `backend/requirements.txt`.
+
+- 2026-10-29T06:31:32+00:00 — Updated backend dependency declarations so the main backend requirements now include the full API runtime stack used by current imports (server, auth hashing, HTTP client, cache, and typing support) with explicit minimum versions.
+
 - 2026-10-28T08:39:24+00:00 — Updated chat execution cards so child-agent calls are visually distinct from tool calls with a larger highlighted rectangle and explicit guidance text prompting users to click to view child-agent execution details.
 
 - 2026-10-28T08:14:25+00:00 — Added context-selection loop resilience in the backend planner pipeline: the agent now tracks recently requested context windows, surfaces loop hints to planning prompts, blocks repeated looped window requests, and exits with a clear limit message instead of spinning indefinitely.
