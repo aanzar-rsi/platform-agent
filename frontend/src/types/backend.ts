@@ -47,6 +47,14 @@ export interface ToolCallEvent {
 
 export type SubagentProgressKind = 'status' | 'reasoning' | 'log' | 'card' | 'test_plan' | 'test_results';
 
+export interface ChildExecutionDetail {
+  resource_type?: 'tool' | 'subagent' | string;
+  resource_name?: string;
+  arguments?: unknown;
+  result?: unknown;
+  success?: boolean;
+}
+
 export interface AgentCardPermissions {
   read?: boolean;
   write?: boolean;
@@ -116,6 +124,7 @@ export interface SubagentCallEvent {
   startedAt?: number;
   /** Client-side timestamp (ms) when the subagent finished. */
   endedAt?: number;
+  executions?: ChildExecutionDetail[];
 }
 
 export type ChildAgentCallEvent = SubagentCallEvent;

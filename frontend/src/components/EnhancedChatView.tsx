@@ -55,6 +55,7 @@ import { agentsAPI, filesAPI, preferencesAPI } from "@/lib/api";
 import { AgentWebSocketClient, createWebSocketClient } from "@/lib/websocket";
 import {
   AgentCardPayload,
+  ChildExecutionDetail,
   AgentTestCasePayload,
   AgentTestResultPayload,
   Message,
@@ -644,6 +645,31 @@ function SubagentConsole({ subagent }: { subagent: SubagentCallEvent }) {
             >
               {formatReadablePayload(subagent.result)}
             </pre>
+          </div>
+        )}
+
+        {subagent.executions && subagent.executions.length > 0 && (
+          <div className={(subagent.result ? "mt-3 border-t pt-3" : "mt-3")} style={{ borderColor: "var(--theme-border)" }}>
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500">Resource calls</div>
+            <div className="space-y-2">
+              {subagent.executions.map((call, idx) => (
+                <div key={idx} className="rounded-md border px-2.5 py-2" style={{ backgroundColor: "#f8f8f6", borderColor: "var(--theme-border)" }}>
+                  <div className="mb-1 text-[10px] font-semibold text-gray-700">
+                    {(call.resource_type || "resource").toUpperCase()}: {call.resource_name || "unknown"}
+                  </div>
+                  {call.arguments !== undefined && (
+                    <pre className="mb-1 whitespace-pre-wrap rounded border px-2 py-1 text-[10px]" style={{ backgroundColor: "#fffeff", borderColor: "var(--theme-border)" }}>
+                      {formatReadablePayload(call.arguments)}
+                    </pre>
+                  )}
+                  {call.result !== undefined && (
+                    <pre className="whitespace-pre-wrap rounded border px-2 py-1 text-[10px]" style={{ backgroundColor: "#fffeff", borderColor: "var(--theme-border)" }}>
+                      {formatReadablePayload(call.result)}
+                    </pre>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -1276,6 +1302,15 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
         onChildStep: (payload: { child_agent_id?: string; event: SubagentProgressEvent }) => {
           if (abort.signal.aborted || !payload.child_agent_id || !payload.event) return;
           appendChildProgress(liveStepsRef.current, payload.child_agent_id, payload.event);
+          const detail = (payload.event as any)?.detail as ChildExecutionDetail | undefined;
+          if (detail && typeof detail === "object" && (detail.resource_name || detail.resource_type)) {
+            const step = [...liveStepsRef.current].reverse().find(
+              (item) => item.type === "child_agent" && item.child.child_agent_id === payload.child_agent_id
+            );
+            if (step?.type === "child_agent") {
+              step.child.executions = [...(step.child.executions || []), detail];
+            }
+          }
           setLiveSteps([...liveStepsRef.current]);
         },
         onChildFinished: (payload: {
@@ -1379,7 +1414,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
           if (payload.execution_id) {
             activeExecutionIdRef.current = payload.execution_id;
           }
-          if (payload.run_active) {
+          if (payload.run_active || runActiveRef.current) {
             ignoreStaleRunEventsRef.current = false;
             setExecuting(true);
           } else {
@@ -1564,6 +1599,15 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
           if (ignoreStaleRunEventsRef.current) return;
           if (!payload.child_agent_id || !payload.event) return;
           appendChildProgress(liveStepsRef.current, payload.child_agent_id, normalizeProgressEvent(payload.event));
+          const detail = (payload.event as any)?.detail as ChildExecutionDetail | undefined;
+          if (detail && typeof detail === "object" && (detail.resource_name || detail.resource_type)) {
+            const step = [...liveStepsRef.current].reverse().find(
+              (item) => item.type === "child_agent" && item.child.child_agent_id === payload.child_agent_id
+            );
+            if (step?.type === "child_agent") {
+              step.child.executions = [...(step.child.executions || []), detail];
+            }
+          }
           setLiveSteps([...liveStepsRef.current]);
         },
         onChildFinished: (payload) => {
@@ -2324,39 +2368,51 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
                   className="group/subagent w-full"
                 >
                   <div className="flex items-start w-full">
-                    <StepBranchTarget
-                      checkpointId={showBranchActions ? stepCheckpointId : undefined}
-                      selected={stepSelected}
-                      onSelect={() => toggleStepBranch(scopeId, index, stepCheckpointId)}
-                      className="flex-1 min-w-0"
-                    >
-                      <div className="flex items-center gap-2 py-1.5 text-xs">
-                        <span
-                          className={`h-2 w-2 shrink-0 rounded-full ${subagentStatusDotClass(subagent)}`}
-                          aria-hidden
-                        />
-                        <Sparkles
-                          className="h-3.5 w-3.5 shrink-0 opacity-60"
-                          style={{ color: "var(--theme-accent)" }}
-                        />
-                        <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
-                        {showAgentName && (
-                          <span className="text-[10px] opacity-45 shrink-0">{subagent.agent_name}</span>
-                        )}
-                      </div>
-                    </StepBranchTarget>
                     <CollapsibleTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          "flex-1 min-w-0 rounded-md text-left transition-colors hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--theme-accent)]",
+                          stepSelected && "ring-1 ring-[var(--theme-accent)]/40"
+                        )}
+                      >
+                        <div className="flex items-center gap-2 py-1.5 text-xs">
+                          <span
+                            className={`h-2 w-2 shrink-0 rounded-full ${subagentStatusDotClass(subagent)}`}
+                            aria-hidden
+                          />
+                          <Sparkles
+                            className="h-3.5 w-3.5 shrink-0 opacity-60"
+                            style={{ color: "var(--theme-accent)" }}
+                          />
+                          <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
+                          {showAgentName && (
+                            <span className="text-[10px] opacity-45 shrink-0">{subagent.agent_name}</span>
+                          )}
+                        </div>
+                      </button>
+                    </CollapsibleTrigger>
+                    {showBranchActions && (
                       <Button
                         type="button"
                         variant="ghost"
                         size="icon"
-                        className="h-7 w-7 shrink-0 opacity-50 hover:opacity-100"
-                        title="Show sub-agent details"
+                        className={cn(
+                          "mt-1 ml-1 h-5 w-5 shrink-0 rounded-md opacity-60 hover:opacity-100",
+                          stepSelected && "bg-neutral-200/80 opacity-100"
+                        )}
+                        title="Fork / rewind from here"
+                        aria-label="Fork / rewind from here"
+                        disabled={!stepCheckpointId}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          toggleStepBranch(scopeId, index, stepCheckpointId);
+                        }}
                       >
-                        <ChevronRight className="h-3 w-3 group-data-[state=open]/subagent:hidden" />
-                        <ChevronDown className="h-3 w-3 hidden group-data-[state=open]/subagent:inline" />
+                        <GitBranch className="h-3 w-3" />
                       </Button>
-                    </CollapsibleTrigger>
+                    )}
                   </div>
                   <CollapsibleContent>
                     <div className="pb-2 pt-1">
@@ -2377,36 +2433,54 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
               <Fragment key={`${subagent.id || "child"}-${index}`}>
                 <Collapsible defaultOpen={false} className="group/child-agent w-full">
                   <div className="flex items-start w-full">
-                    <StepBranchTarget
-                      checkpointId={showBranchActions ? stepCheckpointId : undefined}
-                      selected={stepSelected}
-                      onSelect={() => toggleStepBranch(scopeId, index, stepCheckpointId)}
-                      className="flex-1 min-w-0"
-                    >
-                      <div
-                        className="min-h-20 rounded-lg border-2 px-3 py-2.5"
-                        style={{
-                          borderColor: "rgba(251, 226, 50, 0.85)",
-                          backgroundColor: "rgba(251, 226, 50, 0.16)",
+                    <CollapsibleTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          "flex-1 min-w-0 rounded-lg text-left transition-colors hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--theme-accent)]",
+                          stepSelected && "ring-1 ring-[var(--theme-accent)]/40"
+                        )}
+                      >
+                        <div
+                          className="min-h-20 rounded-lg border-2 px-3 py-2.5"
+                          style={{
+                            borderColor: "rgba(251, 226, 50, 0.85)",
+                            backgroundColor: "rgba(251, 226, 50, 0.16)",
+                          }}
+                        >
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${subagentStatusDotClass(subagent)}`} aria-hidden />
+                            <Sparkles className="h-3.5 w-3.5 shrink-0 opacity-70" style={{ color: "var(--theme-accent)" }} />
+                            <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
+                            <span className="text-[10px] opacity-55 shrink-0">{subagent.child_agent_id || subagent.agent_name}</span>
+                          </div>
+                          <p className="mt-2 text-[11px] font-semibold tracking-wide text-gray-700">
+                            Click to see child agent execution
+                          </p>
+                        </div>
+                      </button>
+                    </CollapsibleTrigger>
+                    {showBranchActions && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className={cn(
+                          "mt-1 ml-1 h-5 w-5 shrink-0 rounded-md opacity-60 hover:opacity-100",
+                          stepSelected && "bg-neutral-200/80 opacity-100"
+                        )}
+                        title="Fork / rewind from here"
+                        aria-label="Fork / rewind from here"
+                        disabled={!stepCheckpointId}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          toggleStepBranch(scopeId, index, stepCheckpointId);
                         }}
                       >
-                        <div className="flex items-center gap-2 text-xs">
-                          <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${subagentStatusDotClass(subagent)}`} aria-hidden />
-                          <Sparkles className="h-3.5 w-3.5 shrink-0 opacity-70" style={{ color: "var(--theme-accent)" }} />
-                          <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
-                          <span className="text-[10px] opacity-55 shrink-0">{subagent.child_agent_id || subagent.agent_name}</span>
-                        </div>
-                        <p className="mt-2 text-[11px] font-semibold tracking-wide text-gray-700">
-                          Click to see child agent execution
-                        </p>
-                      </div>
-                    </StepBranchTarget>
-                    <CollapsibleTrigger asChild>
-                      <Button type="button" variant="ghost" size="icon" className="mt-1 h-9 w-9 shrink-0 opacity-70 hover:opacity-100" title="Show child details" aria-label={`Show execution for ${taskLabel}`}>
-                        <ChevronRight className="h-4 w-4 group-data-[state=open]/child-agent:hidden" />
-                        <ChevronDown className="h-4 w-4 hidden group-data-[state=open]/child-agent:inline" />
+                        <GitBranch className="h-3 w-3" />
                       </Button>
-                    </CollapsibleTrigger>
+                    )}
                   </div>
                   <CollapsibleContent>
                     <div className="pb-2 pt-1">
@@ -2428,37 +2502,49 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
             <Fragment key={`${tool.id || "tool"}-${index}`}>
               <Collapsible defaultOpen={false} className="group/tool w-full">
                 <div className="flex items-start w-full">
-                  <StepBranchTarget
-                    checkpointId={showBranchActions ? stepCheckpointId : undefined}
-                    selected={stepSelected}
-                    onSelect={() => toggleStepBranch(scopeId, index, stepCheckpointId)}
-                    className="flex-1 min-w-0"
-                  >
-                    <div className="flex items-center gap-2 py-1.5 text-xs">
-                      <span
-                        className={`h-2 w-2 shrink-0 rounded-full ${toolStatusDotClass(tool)}`}
-                        aria-hidden
-                      />
-                      <Wrench className="h-3.5 w-3.5 shrink-0 opacity-60" style={{ color: "var(--theme-accent)" }} />
-                        <span className="font-medium min-w-0 flex-1 break-words text-left">{taskLabel}</span>
-                        <span className="shrink-0 text-right text-[10px] leading-tight opacity-55">
-                          {showResourceName && <span className="block font-medium">{resourceName}</span>}
-                          <span className="block font-mono">{tool.id || "No call ID"}</span>
-                        </span>
-                    </div>
-                  </StepBranchTarget>
                   <CollapsibleTrigger asChild>
+                    <button
+                      type="button"
+                      className={cn(
+                        "flex-1 min-w-0 rounded-md text-left transition-colors hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--theme-accent)]",
+                        stepSelected && "ring-1 ring-[var(--theme-accent)]/40"
+                      )}
+                    >
+                      <div className="flex items-center gap-2 py-1.5 text-xs">
+                        <span
+                          className={`h-2 w-2 shrink-0 rounded-full ${toolStatusDotClass(tool)}`}
+                          aria-hidden
+                        />
+                        <Wrench className="h-3.5 w-3.5 shrink-0 opacity-60" style={{ color: "var(--theme-accent)" }} />
+                          <span className="font-medium min-w-0 flex-1 break-words text-left">{taskLabel}</span>
+                          <span className="shrink-0 text-right text-[10px] leading-tight opacity-55">
+                            {showResourceName && <span className="block font-medium">{resourceName}</span>}
+                            <span className="block font-mono">{tool.id || "No call ID"}</span>
+                          </span>
+                      </div>
+                    </button>
+                  </CollapsibleTrigger>
+                  {showBranchActions && (
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="h-7 w-7 shrink-0 opacity-50 hover:opacity-100"
-                      title="Show tool details"
+                      className={cn(
+                        "mt-1 ml-1 h-5 w-5 shrink-0 rounded-md opacity-60 hover:opacity-100",
+                        stepSelected && "bg-neutral-200/80 opacity-100"
+                      )}
+                      title="Fork / rewind from here"
+                      aria-label="Fork / rewind from here"
+                      disabled={!stepCheckpointId}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        toggleStepBranch(scopeId, index, stepCheckpointId);
+                      }}
                     >
-                      <ChevronRight className="h-3 w-3 group-data-[state=open]/tool:hidden" />
-                      <ChevronDown className="h-3 w-3 hidden group-data-[state=open]/tool:inline" />
+                      <GitBranch className="h-3 w-3" />
                     </Button>
-                  </CollapsibleTrigger>
+                  )}
                 </div>
                 <CollapsibleContent>
                   <div className="pl-6 pb-2 pt-1">

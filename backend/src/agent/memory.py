@@ -207,13 +207,28 @@ def summarize_context_selection_history(
         if count > 1
     ]
 
+    global_counts: dict[tuple[str, int, int | None], int] = {}
+    for item in history:
+        sig = _window_signature(item.get("key", ""), item.get("from_token") or 0, item.get("to_token"))
+        global_counts[sig] = global_counts.get(sig, 0) + 1
+    repeated_windows_global = [
+        {"key": sig[0], "from_token": sig[1], "to_token": sig[2], "count": count}
+        for sig, count in sorted(global_counts.items(), key=lambda item: item[1], reverse=True)
+        if count > 1
+    ]
+
     loop_detected = False
     reason = ""
 
     most_repeated = max(counts.values()) if counts else 0
+    most_repeated_global = max(global_counts.values()) if global_counts else 0
     if most_repeated >= 3:
         loop_detected = True
         reason = "same context window requested repeatedly"
+
+    if not loop_detected and most_repeated_global >= 3:
+        loop_detected = True
+        reason = "same context window requested repeatedly across the run"
 
     if not loop_detected and len(signatures) >= 6:
         unique = list(dict.fromkeys(signatures))
@@ -234,6 +249,7 @@ def summarize_context_selection_history(
             for item in recent
         ],
         "repeated_windows": repeated_windows,
+        "repeated_windows_global": repeated_windows_global,
         "loop_detected": loop_detected,
         "reason": reason,
         "selection_count": len(history),

@@ -72,6 +72,35 @@ def test_child_events_emit_started_step_finished(monkeypatch):
     assert child_packets[2]["payload"]["success"] is True
 
 
+def test_child_tool_finished_event_is_forwarded_as_child_step(monkeypatch):
+    runtime = AgentRuntime()
+    writer = _Writer()
+
+    monkeypatch.setattr("api.services.agent_runtime.get_agent_app", lambda: object())
+    monkeypatch.setattr("src.utils.agent_logger.log_event", lambda *args, **kwargs: None)
+
+    def fake_run_turn(*args, **kwargs):
+        yield {"output_security_gate": {"output_events": [{
+            "kind": "tool.finished",
+            "payload": {
+                "tool_name": "BAPI_TEST",
+                "tool_args": {"q": "x"},
+                "result": "ok",
+                "success": True,
+                "child_agent_id": "child-1",
+            },
+        }]}}
+        yield {"agent_node": {"next_step": {"action": "finish", "answer": "done"}}}
+
+    monkeypatch.setattr("src.utils.postgres_checkpointer.run_turn", fake_run_turn)
+
+    runtime.run_turn(agent_id="agent-parent", owner_id="u1", query="go", event_writer=writer)
+    child_steps = [p for p in writer.events if p["type"] == "child.step"]
+    assert child_steps
+    assert child_steps[0]["payload"]["child_agent_id"] == "child-1"
+    assert child_steps[0]["payload"]["event"]["detail"]["resource_name"] == "BAPI_TEST"
+
+
 def test_runtime_forwards_llm_lifecycle_and_dispatch_resource_events(monkeypatch):
     from src.agent.token_stream import emit_lifecycle
 

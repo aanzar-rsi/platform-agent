@@ -155,6 +155,26 @@ def test_connect_cancellation_returns_http_502_instead_of_escaping():
     assert exc.value.detail["logs"][-1]["level"] == "ERROR"
 
 
+def test_connect_retries_once_after_cancellation_for_http_transports():
+    repo = MemoryRepo()
+    repos = type("Repos", (), {"mcp": repo})()
+    user = CurrentUser(uid="alice", session_id="s", role="user", raw={})
+    service = McpService(repos)
+    server = repo.create(
+        user.uid,
+        name="retry-http",
+        url="http://127.0.0.1:8000/mcp",
+        metadata={"command": None, "transport": "streamable_http", "args": [], "env": {}, "enabled": True},
+    )
+    fake_conn = type("Conn", (), {"tools": [{"name": "hello"}]})()
+    with patch("api.services.mcp_service.mcp_runtime.connect", side_effect=[asyncio.CancelledError("cancel scope"), fake_conn]) as connect:
+        result = service.connect(user, server["id"])
+    assert result["success"] is True
+    assert result["tools_count"] == 1
+    assert connect.call_count == 2
+    assert any(log["level"] == "WARNING" and "retrying once" in log["message"] for log in result["logs"])
+
+
 def test_stale_connection_cleanup_cancellation_does_not_block_reconnect():
     connection = McpConnection.__new__(McpConnection)
     connection.server = {"id": "server"}

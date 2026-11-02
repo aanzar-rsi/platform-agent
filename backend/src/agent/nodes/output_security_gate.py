@@ -21,7 +21,7 @@ _CREDENTIAL = re.compile(
     r"(\s*[:=]\s*)([^\s,;]+)"
 )
 _METADATA_FIELDS = {
-    "armory_result": {"resource_type", "resource_name", "arguments", "structured"},
+    "armory_result": {"resource_type", "resource_name", "arguments", "structured", "child_agent_id"},
     "child_spawn": {"child_agent_id", "tool_args", "requested_policy"},
     "child_collection": {"child_agent_id"},
     "human_input": {"question", "input_kind", "resume_context"},
@@ -157,6 +157,8 @@ def _events_for(result: dict, *, action_id: str, step_id: str = "",
         payload.update({"agent_name" if resource_type == "subagent" else "tool_name": result["name"]})
         if resource_type == "tool":
             payload["tool_args"] = result["metadata"].get("arguments") or {}
+        if result["metadata"].get("child_agent_id"):
+            payload["child_agent_id"] = result["metadata"].get("child_agent_id")
     elif kind in {"child_spawn", "child_collection"}:
         event = "child.started" if result["status"] == "running" else "child.finished"
         payload.update(child_agent_id=result["metadata"].get("child_agent_id"), agent_name="child_agent")

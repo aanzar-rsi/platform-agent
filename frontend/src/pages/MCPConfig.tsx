@@ -385,17 +385,33 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
         throw new Error('Arguments must be a JSON string array and environment must be a JSON string map');
       }
       const response = await mcpAPI.createServer({ ...formData, args, env });
-      setConnectionLogs(response.server.connection_logs || []);
-      if (response.server.connection_logs?.length) setConnectionLogsCollapsed(false);
-      if (response.server.connected) toast.success("Server registered and connected");
-      else if (formData.enabled === false) toast.success("Server registered (disabled)");
-      else {
-        setConnectionErrors(prev => ({ ...prev, [response.server.id]: response.server.connection_error || 'Connection failed' }));
-        toast.error(`Server registered; connection failed: ${response.server.connection_error}`);
+      let createdServer = response.server;
+      if (formData.enabled !== false && !createdServer.connected) {
+        try {
+          const latest = await mcpAPI.getServer(createdServer.id);
+          if (latest.server) createdServer = latest.server;
+        } catch {
+          // keep original create response
+        }
       }
-      setServers(prev => [...prev.filter(server => server.id !== response.server.id), response.server]);
-      setConnectionErrors(prev => { const next = { ...prev }; delete next[response.server.id]; return next; });
+
+      setConnectionLogs(createdServer.connection_logs || response.server.connection_logs || []);
+      if ((createdServer.connection_logs || response.server.connection_logs || []).length) setConnectionLogsCollapsed(false);
+
+      if (createdServer.connected) {
+        setConnectionErrors(prev => { const next = { ...prev }; delete next[createdServer.id]; return next; });
+        toast.success("Server registered and connected");
+      } else if (formData.enabled === false) {
+        toast.success("Server registered (disabled)");
+      } else {
+        const reason = createdServer.connection_error || response.server.connection_error || 'Connection failed';
+        setConnectionErrors(prev => ({ ...prev, [createdServer.id]: reason }));
+        toast.error(`Server registered; connection failed: ${reason}`);
+      }
+
+      setServers(prev => [...prev.filter(server => server.id !== createdServer.id), createdServer]);
       setViewMode('list');
+      navigate(embedded ? "/agents/mcp-config" : "/mcp-config", { replace: true });
       resetForm();
       await loadServers();
     } catch (error: any) {
@@ -418,6 +434,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
       await mcpAPI.updateServer(selectedServerId, { ...formData, args, env });
       toast.success("Server updated successfully");
       setViewMode('list');
+      navigate(embedded ? "/agents/mcp-config" : "/mcp-config", { replace: true });
       resetForm();
       setSelectedServerId(null);
       loadServers();
@@ -1063,6 +1080,7 @@ export default function MCPConfig({ embedded = false }: { embedded?: boolean }) 
                   variant="outline"
                   onClick={() => {
                     setViewMode('list');
+                    navigate(embedded ? "/agents/mcp-config" : "/mcp-config", { replace: true });
                     resetForm();
                     setSelectedServerId(null);
                   }}

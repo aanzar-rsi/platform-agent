@@ -117,19 +117,31 @@ class McpService:
         target = server["command"] or server["url"]
         transport = "stdio" if server["command"] else server.get("transport") or "streamable_http"
         logs = [connection_log("INFO", f"Connecting via {transport}: {target}")]
-        try:
-            conn = mcp_runtime.connect(user.uid, server)
-        except BaseException as exc:
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                raise
-            logger.warning("MCP connection failed for %s (transport=%s, url=%s, command=%s): %s",
-                           server_id, server.get("transport"), server.get("url"), server.get("command"), exc)
-            reason = str(exc) or type(exc).__name__
-            if reason == "Session terminated":
-                reason = (f"The MCP server returned HTTP 404 during the handshake at {server['url']}. "
-                          "Check the MCP endpoint path and select the correct HTTP transport (Streamable HTTP or Legacy SSE).")
+        conn = None
+        attempts = 2 if transport in ("streamable_http", "sse") else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                conn = mcp_runtime.connect(user.uid, server)
+                break
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                reason = str(exc) or type(exc).__name__
+                cancellation = "cancel scope" in reason.lower() or "cancelled" in reason.lower()
+                if cancellation and attempt < attempts:
+                    logs.append(connection_log("WARNING", "Handshake cancelled during startup; retrying once."))
+                    continue
+                logger.warning("MCP connection failed for %s (transport=%s, url=%s, command=%s): %s",
+                               server_id, server.get("transport"), server.get("url"), server.get("command"), exc)
+                if reason == "Session terminated":
+                    reason = (f"The MCP server returned HTTP 404 during the handshake at {server['url']}. "
+                              "Check the MCP endpoint path and select the correct HTTP transport (Streamable HTTP or Legacy SSE).")
+                logs.append(connection_log("ERROR", reason))
+                raise HTTPException(status_code=502, detail={"message": f"MCP connection failed: {reason}", "logs": logs}) from exc
+        if conn is None:
+            reason = "MCP connection failed"
             logs.append(connection_log("ERROR", reason))
-            raise HTTPException(status_code=502, detail={"message": f"MCP connection failed: {reason}", "logs": logs}) from exc
+            raise HTTPException(status_code=502, detail={"message": reason, "logs": logs})
         logs.append(connection_log("INFO", f"Handshake complete; discovered {len(conn.tools)} tool(s)."))
         return {"success": True, "message": "Connected", "server_id": server_id,
                 "tools_count": len(conn.tools), "tools": [tool["name"] for tool in conn.tools], "logs": logs}

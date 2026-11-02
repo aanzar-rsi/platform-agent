@@ -453,6 +453,32 @@ class TestContextSelectionSummary(unittest.TestCase):
         self.assertTrue(summary["loop_detected"])
         self.assertIn("same context window", summary["reason"])
 
+    def test_loop_summary_reports_global_repeated_windows(self):
+        history = []
+        for key in ("tool_1", "tool_2", "tool_3", "tool_4"):
+            history, _ = record_context_selection(
+                history,
+                key=key,
+                from_token=0,
+                to_token=100,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=500,
+            )
+        for _ in range(3):
+            history, summary = record_context_selection(
+                history,
+                key="tool_1",
+                from_token=0,
+                to_token=100,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=500,
+            )
+        self.assertTrue(summary["loop_detected"])
+        self.assertIn("across the run", summary["reason"])
+        self.assertEqual(summary["repeated_windows_global"][0]["key"], "tool_1")
+
 
 class TestRouting(unittest.TestCase):
     def test_armory(self):

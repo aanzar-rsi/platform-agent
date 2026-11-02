@@ -33,6 +33,8 @@ from src.agent.facets import Armory
 # stalling the entire turn by tens of seconds.
 _EXPERIENCE_TIMEOUT_SECONDS = 4.0
 _experience_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="learned-exp")
+_CHILD_MAX_HISTORY_STEPS = 48
+_CHILD_MAX_CONTEXT_SELECTIONS = 18
 
 
 def _safe_learned_experiences(
@@ -397,6 +399,23 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
     user_query = _latest_human_content(messages)
 
     execution_history = state.get("execution_history", [])
+    configurable = (config or {}).get("configurable") or {}
+    child_mode = bool(configurable.get("child_agent_id"))
+    if child_mode:
+        context_select_count = sum(1 for entry in execution_history if entry.get("type") == "context_select")
+        if context_select_count >= _CHILD_MAX_CONTEXT_SELECTIONS or len(execution_history) >= _CHILD_MAX_HISTORY_STEPS:
+            answer = (
+                "I stopped this child-agent run because it reached the execution safety budget "
+                "without converging on a final answer. "
+                "Please narrow the task or ask me to return the best available partial findings."
+            )
+            return {
+                "current_task": "finish",
+                "next_step": {"action": "finish", "answer": answer},
+                "messages": [AIMessage(content=answer)],
+                "planned_phases": [],
+                "planned_phase_index": 0,
+            }
 
     pending_children = _pending_children(execution_history)
     has_child_history = any(entry.get("type") == "child_agent" for entry in execution_history)
@@ -405,7 +424,6 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
     context_selection_summary = state.get("context_selection_summary") or {}
     preloaded = state.get("preloaded_context") or {}
 
-    configurable = (config or {}).get("configurable") or {}
     uid = configurable.get("owner_id")
 
     # The newest top-level request stays direct. Older top-level human inputs
@@ -618,7 +636,7 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
                 int(item.get("from_token") or 0),
                 None if item.get("to_token") is None else _coerce_int(item.get("to_token"), None),
             )
-            for item in (loop_summary.get("repeated_windows") or [])
+            for item in ((loop_summary.get("repeated_windows") or []) + (loop_summary.get("repeated_windows_global") or []))
             if isinstance(item, dict)
         }
         if (key, from_token, to_token) in repeated:

@@ -7,6 +7,7 @@ const getMock = vi.fn();
 const createMock = vi.fn();
 const rollbackMock = vi.fn();
 const listCheckpointsMock = vi.fn();
+const listCheckpointTreeMock = vi.fn();
 const preferencesGetMock = vi.fn();
 const preferencesUpdateMock = vi.fn();
 
@@ -31,6 +32,7 @@ vi.mock("@/lib/api", () => ({
     create: (...args: any[]) => createMock(...args),
     rollback: (...args: any[]) => rollbackMock(...args),
     listCheckpoints: (...args: any[]) => listCheckpointsMock(...args),
+    listCheckpointTree: (...args: any[]) => listCheckpointTreeMock(...args),
   },
   preferencesAPI: {
     get: (...args: any[]) => preferencesGetMock(...args),
@@ -82,6 +84,7 @@ describe("EnhancedChatView", () => {
     createMock.mockReset();
     rollbackMock.mockReset();
     listCheckpointsMock.mockReset();
+    listCheckpointTreeMock.mockReset();
     preferencesGetMock.mockReset();
     preferencesUpdateMock.mockReset();
     startRunMock.mockReset();
@@ -117,6 +120,18 @@ describe("EnhancedChatView", () => {
     listCheckpointsMock.mockResolvedValue([
       { checkpoint_id: "cp_tip", parent_checkpoint_id: "cp_parent", timestamp: null, current_task: null, message_snippet: null },
       { checkpoint_id: "cp_parent", parent_checkpoint_id: null, timestamp: null, current_task: null, message_snippet: null },
+    ]);
+    listCheckpointTreeMock.mockResolvedValue([
+      {
+        checkpoint_id: "cp_tool",
+        parent_checkpoint_id: "cp_parent",
+        timestamp: null,
+        current_task: "clock",
+        message_snippet: "clock call",
+        node: "armory_node",
+        is_active_tip: false,
+        is_leaf: true,
+      },
     ]);
     rollbackMock.mockResolvedValue({ success: true, checkpoint_id: "cp_parent" });
   });
@@ -258,6 +273,25 @@ describe("EnhancedChatView", () => {
     expect(getMock.mock.calls.length).toBe(1);
   });
 
+  it("keeps live run events flowing when a stale session.ready reports run_active=false mid-run", async () => {
+    render(
+      <MemoryRouter>
+        <EnhancedChatView sessionId="chat_1" />
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(connectMock).toHaveBeenCalled());
+
+    await act(async () => {
+      wsHandlers.onSessionReady?.({ last_seq: 0, run_active: true, backlog_count: 0, epoch: 1 });
+      wsHandlers.onRunStarted?.({ execution_id: "r-stale", query: "New run" });
+      wsHandlers.onSessionReady?.({ last_seq: 5, run_active: false, backlog_count: 0, epoch: 1 });
+      wsHandlers.onLlmToken?.({ text: "Still streaming", channel: "output" });
+    });
+
+    expect(screen.getByText("New run")).toBeInTheDocument();
+    expect(screen.getByText("Still streaming")).toBeInTheDocument();
+  });
+
   it("streams tokens into live bubble then finalizes on run.completed", async () => {
     render(
       <MemoryRouter>
@@ -313,6 +347,59 @@ describe("EnhancedChatView", () => {
     await waitFor(() => expect(getMock.mock.calls.length).toBeGreaterThan(1));
     expect(screen.getByText("clock")).toBeInTheDocument();
     expect(screen.getByText("clock-call-1")).toBeInTheDocument();
+  });
+
+  it("opens call details on row click and shows fork/rewind only from branch button", async () => {
+    const user = userEvent.setup();
+    getMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        title: "Tool Chat",
+        latest_execution: null,
+        messages: [
+          { role: "user", content: "Use clock", message_id: "m1" },
+          {
+            role: "assistant",
+            content: "Done",
+            message_id: "m2",
+            checkpoint_id: "cp_tool",
+            metadata: {
+              steps: [
+                {
+                  type: "tool",
+                  tool: {
+                    id: "clock-call-1",
+                    tool_name: "clock",
+                    task: "Get UTC time",
+                    tool_args: { timezone: "UTC" },
+                    result: "12:00",
+                    status: "done",
+                    success: true,
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        rollback_checkpoint_id: null,
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <EnhancedChatView sessionId="chat_1" />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText("Get UTC time")).toBeInTheDocument());
+    expect(screen.queryByText("Fork & explore")).not.toBeInTheDocument();
+
+    await user.click(screen.getByText("Get UTC time"));
+    expect(await screen.findByText("Parameters")).toBeInTheDocument();
+    expect(screen.queryByText("Fork & explore")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Fork / rewind from here" }));
+    expect(await screen.findByText("Fork & explore")).toBeInTheDocument();
   });
 
   it("keeps thinking at the bottom for every sequential LLM call", async () => {
@@ -380,8 +467,57 @@ describe("EnhancedChatView", () => {
     expect(screen.getByText("child-1")).toBeInTheDocument();
     expect(screen.getByText("Click to see child agent execution")).toBeInTheDocument();
     expect(screen.queryByText("child-only-reasoning")).not.toBeInTheDocument();
-    await user.click(screen.getByTitle("Show child details"));
+    await user.click(screen.getByText("Investigate child marker"));
     expect(screen.getByText("child-only-reasoning")).toBeInTheDocument();
+  });
+
+  it("renders child resource calls inside child expandable", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <EnhancedChatView sessionId="chat_1" />
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(connectMock).toHaveBeenCalled());
+
+    await act(async () => {
+      wsHandlers.onSessionReady?.({ last_seq: 0, run_active: true, backlog_count: 0, epoch: 1 });
+      wsHandlers.onRunStarted?.({ execution_id: "r-child-2", query: "delegate" });
+      wsHandlers.onChildStarted?.({
+        agent_name: "child_agent",
+        child_agent_id: "child-2",
+        task: "Inspect ERP",
+      });
+      wsHandlers.onChildStep?.({
+        agent_name: "child_agent",
+        child_agent_id: "child-2",
+        event: {
+          step: "armory",
+          message: "BAPI_TEST: ok",
+          status: "completed",
+          kind: "log",
+          detail: {
+            resource_type: "tool",
+            resource_name: "BAPI_TEST",
+            arguments: { q: "x" },
+            result: "ok",
+            success: true,
+          },
+        },
+      });
+      wsHandlers.onChildFinished?.({
+        agent_name: "child_agent",
+        child_agent_id: "child-2",
+        result: "done",
+        success: true,
+      });
+    });
+
+    await user.click(screen.getByText("Inspect ERP"));
+    expect(screen.getByText("Resource calls")).toBeInTheDocument();
+    expect(screen.getByText("TOOL: BAPI_TEST")).toBeInTheDocument();
+    expect(screen.getByText(/"q": "x"/)).toBeInTheDocument();
+    expect(screen.getByText("ok")).toBeInTheDocument();
   });
 
   it("ignores run.completed for a different execution id while parent run is active", async () => {

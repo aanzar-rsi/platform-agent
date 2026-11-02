@@ -72,3 +72,22 @@ def test_mcp_resource_alias_does_not_mutate_set_during_iteration(_stream, _promp
         ("tool", "mcp_weather"),
         ("mcp_server", "mcp_weather"),
     }
+
+
+@patch.object(agentnode.Armory, "list", return_value=[])
+@patch.object(agentnode, "_safe_learned_experiences", return_value="")
+@patch.object(agentnode, "planner_agent_prompt_loader", return_value=("planner-sys", "planner-user"))
+@patch.object(agentnode, "call_llm_stream", return_value=iter(["<action>continue</action>"]))
+def test_child_mode_stops_after_context_select_budget(_stream, _prompt, _learned, _resources):
+    state = {
+        **_state("child query"),
+        "execution_history": [
+            {"type": "context_select", "status": "completed", "success": True}
+            for _ in range(18)
+        ],
+    }
+    cfg = _config()
+    cfg["configurable"]["child_agent_id"] = "child-1"
+    out = agentnode.agent_node(state, cfg)
+    assert out["next_step"]["action"] == "finish"
+    assert "execution safety budget" in out["next_step"]["answer"]

@@ -41,7 +41,8 @@ def armory_node(state: dict, config=None) -> dict:
         if not approved:
             result, structured = {"success": False, "error": "User declined to run this resource."}, None
             return _result_envelope(state, next_step, resource_type, resource_name, arguments, task,
-                                    result, structured, note=note)
+                                    result, structured, note=note,
+                                    child_agent_id=configurable.get("child_agent_id"))
 
     if resource_type == "subagent":
         emit_subagent_event(resource_name, {"kind": "start", "message": "Starting",
@@ -56,7 +57,8 @@ def armory_node(state: dict, config=None) -> dict:
                                              "message": "Completed" if success else str(result),
                                              "action_id": next_step.get("action_id")})
     return _result_envelope(state, next_step, resource_type, resource_name, arguments, task, result, structured,
-                            note=note if 'note' in locals() else "")
+                            note=note if 'note' in locals() else "",
+                            child_agent_id=configurable.get("child_agent_id"))
 
 
 def _envelope(state, next_step, source, results):
@@ -66,7 +68,8 @@ def _envelope(state, next_step, source, results):
     return branch_result(state, envelope)
 
 
-def _result_envelope(state, next_step, resource_type, resource_name, arguments, task, result, structured, *, note=""):
+def _result_envelope(state, next_step, resource_type, resource_name, arguments, task, result, structured, *, note="",
+                     child_agent_id=None):
     success = not (isinstance(result, dict) and result.get("success") is False)
     results = []
     if note:
@@ -77,6 +80,7 @@ def _result_envelope(state, next_step, resource_type, resource_name, arguments, 
         "kind": "armory_result", "value": result, "success": success, "task": task,
         "name": resource_name, "description": task or f"armory.{resource_type}.{resource_name}",
         "metadata": {"resource_type": resource_type, "resource_name": resource_name,
-                     "arguments": arguments, "structured": structured},
+                     "arguments": arguments, "structured": structured,
+                     **({"child_agent_id": child_agent_id} if child_agent_id else {})},
     })
     return _envelope(state, next_step, "armory", results)

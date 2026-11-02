@@ -202,3 +202,23 @@ def test_collect_child_timeout_keeps_child_running_and_requeues(monkeypatch):
     assert out["planned_phases"] == []
     assert out["current_task"] == "collect_child"
     assert any(event["kind"] == "child.started" for event in out["output_events"])
+
+
+def test_armory_result_carries_child_agent_id_in_events():
+    result = {
+        "kind": "armory_result",
+        "value": "ok",
+        "success": True,
+        "name": "lookup",
+        "task": "find",
+        "description": "find",
+        "metadata": {
+            "resource_type": "tool",
+            "resource_name": "lookup",
+            "arguments": {"q": "x"},
+            "child_agent_id": "child-1",
+        },
+    }
+    out = output_security_gate_node(state(envelope(result)))
+    tool_event = next(event for event in out["output_events"] if event["kind"] == "tool.finished")
+    assert tool_event["payload"]["child_agent_id"] == "child-1"

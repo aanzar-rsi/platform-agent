@@ -1,5 +1,17 @@
 # High-Level Changelog
 
+- 2026-11-02T13:16:37+00:00 — Updated ignore rules to exclude learner-agent source from this repo, keep runtime logs ignored, and ignore script-local input/output artifact files.
+
+- 2026-11-02T13:09:15+00:00 — Refined call-card controls by removing the redundant right-side details caret and replacing it with a smaller right-side fork/rewind button, while keeping row-click-to-expand details behavior.
+
+- 2026-11-02T13:02:21+00:00 — Changed execution-card interactions so clicking tool/subagent/child-agent call rows now opens their call-details dropdown, while fork/rewind moved behind a dedicated small branch button on the left of each call row.
+
+- 2026-11-02T06:32:32+00:00 — Hardened child-agent execution stability and observability: added stronger loop safeguards to stop repeated context-selection churn in child runs, normalized Armory tool-name aliases to reduce retry loops, and expanded child execution visibility so child cards now include detailed resource/Armory call activity beyond reasoning text.
+
+- 2026-11-02T06:32:03+00:00 — Fixed the new-chat first-message live execution UX so agent activity now appears immediately without requiring a page refresh when a stale `session.ready` snapshot briefly reports `run_active=false` during an active run.
+
+- 2026-11-02T05:48:30+00:00 — Fixed MCP first-connect UX and reconnect reliability: newly added servers now stay on the MCP list flow with correct first autoconnect status/error handling, and HTTP MCP reconnect now tolerates transient startup cancellation by retrying once before surfacing failure.
+
 - 2026-10-30T07:43:05+00:00 — Merged local first-time setup and degraded-startup improvements into `dev` alongside the remote single-file backend dependency update, retaining both branches' documentation history.
 
 - 2026-10-30T06:01:47+00:00 — Wired the new `scripts/firsttime_setup.py` into root quick-start documentation so first-run setup now includes a single guided DB + test-user bootstrap step before `./run_dev`.

@@ -365,6 +365,29 @@ class AgentRuntime:
                                 payload = dict(output_event.get("payload") or {})
                                 if "result" in payload:
                                     payload["result"] = _truncate(payload["result"])
+                                child_id = payload.get("child_agent_id")
+                                if child_id and event in {"tool.finished", "subagent.finished"}:
+                                    payload["event"] = {
+                                        "kind": "log",
+                                        "step": "armory",
+                                        "status": "completed" if payload.get("success", True) else "error",
+                                        "message": (
+                                            f"{payload.get('tool_name') or payload.get('agent_name')}: "
+                                            f"{_truncate(payload.get('result'))}"
+                                        ),
+                                        "detail": {
+                                            "resource_type": "subagent" if event == "subagent.finished" else "tool",
+                                            "resource_name": payload.get("tool_name") or payload.get("agent_name"),
+                                            "arguments": payload.get("tool_args") or {},
+                                            "result": payload.get("result"),
+                                            "success": payload.get("success", True),
+                                        },
+                                    }
+                                    event_writer.enqueue("child.step", {
+                                        "agent_name": "child_agent",
+                                        "child_agent_id": child_id,
+                                        "event": payload["event"],
+                                    })
                                 if event:
                                     event_writer.enqueue(event, payload)
 

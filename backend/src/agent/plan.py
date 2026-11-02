@@ -212,6 +212,12 @@ def parse_plan(
                     continue
                 if not isinstance(step.get("id"), str):
                     step["id"] = str(step.get("id") or f"step-{phase_index + 1}")
+                if step.get("action") == "armory_call" and isinstance(step.get("name"), str):
+                    name = step["name"].strip()
+                    if name.startswith("armory.tool."):
+                        step["name"] = name[len("armory.tool."):]
+                    elif name.startswith("armory.subagent."):
+                        step["name"] = name[len("armory.subagent."):]
                 uses = step.get("uses")
                 if isinstance(uses, list):
                     # Some planner responses put resource names in `uses`; that
@@ -359,6 +365,17 @@ def parse_plan(
             for item in (loop_summary.get("repeated_windows") or [])
             if isinstance(item, dict)
         }
+        repeated_signatures.update(
+            {
+                (
+                    str(item.get("key") or ""),
+                    int(item.get("from_token") or 0),
+                    None if item.get("to_token") is None else int(item.get("to_token")),
+                )
+                for item in (loop_summary.get("repeated_windows_global") or [])
+                if isinstance(item, dict)
+            }
+        )
         if repeated_signatures and any(signature in repeated_signatures for signature in seen_windows):
             raise ValueError("context_select loop detected: requested repeated window")
     return plan.model_dump()["phases"]
