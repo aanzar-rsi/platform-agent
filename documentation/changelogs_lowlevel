@@ -1,5 +1,11 @@
 # Low-Level Changelog
 
+- 2026-11-03T07:07:37+00:00 — Deleted the tracked `documentation/ArchitectureDiagram.drawio` from this branch; the file remains available in its original commit history.
+
+- 2026-11-03T06:57:15+00:00 — Changed the two top-level headings in `README.md` from `Docker Setup` to `Setup with Docker` and from `Quick Start (local development)` to `To setup without Docker`.
+
+- 2026-11-03T06:52:25+00:00 — Resolved the `README.md` merge conflict by moving the Compose instructions into a standalone Docker Setup section and retaining `dev`'s local dependency and first-time setup steps. Updated `backend/Dockerfile` to install only `backend/requirements.txt`, matching the consolidated dependencies on `dev`, and aligned the README liveness description with the current response.
+
 - 2026-11-02T13:16:37+00:00 — Updated `.gitignore` to ignore learner-agent source at `backend/src/subagents/learner_agent/`, keep log folders ignored (`backend/logs/` and `logs/`), and ignore script artifacts via explicit paths (`scripts/inputs.txt`, `scripts/output.txt`, `scripts/output1.txt`).
 
 - 2026-11-02T13:09:15+00:00 — Updated `frontend/src/components/EnhancedChatView.tsx` to remove the redundant right-side call-details caret buttons (`Show sub-agent details`, `Show child details`, `Show tool details`) and place the fork/rewind action on the right side instead. Shrank the fork button styling across call rows to `h-5 w-5` with a smaller icon (`h-3 w-3`) and retained branch-selection highlight + disabled state when no checkpoint is mapped. Updated child-expansion tests in `frontend/src/components/__tests__/EnhancedChatView.test.tsx` to open details by clicking row labels instead of the removed caret button titles.
