@@ -1,5 +1,7 @@
 # High-Level Changelog
 
+- 2026-11-03T07:07:37+00:00 — Removed the unrelated architecture diagram from the Docker Compose branch so it no longer appears in the PR against `dev`.
+
 - 2026-11-03T06:57:15+00:00 — Renamed the README onboarding headings to clearly distinguish setup with Docker from setup without Docker.
 
 - 2026-11-03T06:52:25+00:00 — Integrated `dev` into the Docker Compose branch and documented Docker setup separately from local development, preserving both onboarding paths.
