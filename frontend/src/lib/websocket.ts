@@ -22,7 +22,9 @@ export type ServerEventType =
   | 'node.finished'
   | 'llm.token'
   | 'llm.cache_hit'
+  | 'llm.started'
   | 'llm.done'
+  | 'llm.error'
   | 'tool.started'
   | 'tool.finished'
   | 'subagent.started'
@@ -70,21 +72,25 @@ export interface AgentWebSocketHandlers {
     source_call_id?: string;
     cache_key?: string;
   }) => void;
-  onLlmDone?: (payload: { channel?: string }) => void;
-  onToolStarted?: (payload: { tool_name: string; tool_args?: unknown; task?: string }) => void;
+  onLlmStarted?: (payload: LlmLifecyclePayload) => void;
+  onLlmDone?: (payload: LlmLifecyclePayload) => void;
+  onLlmError?: (payload: LlmLifecyclePayload & { message?: string }) => void;
+  onToolStarted?: (payload: { action_id?: string; tool_name: string; tool_args?: unknown; task?: string }) => void;
   onToolFinished?: (payload: {
+    action_id?: string;
     tool_name: string;
     tool_args?: unknown;
     task?: string;
     result?: string;
     success?: boolean;
   }) => void;
-  onSubagentStarted?: (payload: { agent_name: string; tool_args?: unknown; task?: string }) => void;
+  onSubagentStarted?: (payload: { action_id?: string; agent_name: string; tool_args?: unknown; task?: string }) => void;
   onSubagentStep?: (payload: {
     agent_name: string;
-    event: { step: string; message: string; status: string; ts?: string; kind?: string; detail?: unknown };
+    event: { step: string; message: string; status: string; ts?: string; kind?: string; detail?: unknown; action_id?: string };
   }) => void;
   onSubagentFinished?: (payload: {
+    action_id?: string;
     agent_name: string;
     task?: string;
     result?: string;
@@ -131,6 +137,17 @@ export interface AgentWebSocketHandlers {
   onOpen?: () => void;
   onClose?: (ev: CloseEvent) => void;
   onReconnect?: (attempt: number) => void;
+}
+
+export interface LlmLifecyclePayload {
+  call_id: string;
+  mode?: string;
+  model_id?: string;
+  output_type?: string | null;
+  agent_id?: string;
+  child_agent_id?: string;
+  cached?: boolean;
+  latency_ms?: number;
 }
 
 export class AgentWebSocketClient {
@@ -365,8 +382,14 @@ export class AgentWebSocketClient {
       case 'llm.cache_hit':
         this.handlers.onLlmCacheHit?.(payload as any);
         break;
+      case 'llm.started':
+        this.handlers.onLlmStarted?.(payload as any);
+        break;
       case 'llm.done':
         this.handlers.onLlmDone?.(payload as any);
+        break;
+      case 'llm.error':
+        this.handlers.onLlmError?.(payload as any);
         break;
       case 'tool.started':
         this.handlers.onToolStarted?.(payload as any);

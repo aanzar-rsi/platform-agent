@@ -12,24 +12,24 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from langgraph.graph import END
 from langchain_core.messages import HumanMessage
 
 from src.agent.edges.routing import (
     ARMORY_NODE,
     CHILD_AGENT_NODE,
     CONTEXT_SELECTOR_NODE,
-    route_from_agent,
-    route_from_input_gate,
 )
+from src.agent.nodes.execution_dispatcher import dispatch_execution
 from src.agent.memory import (
     CONTEXT_MEMORY_BUDGET,
     build_execution_memory_index,
     count_content_tokens,
     empty_context_memory,
+    record_context_selection,
     serialize_content,
     slice_by_tokens,
     slim_execution_history,
+    summarize_context_selection_history,
     update_context_memory,
 )
 from src.agent.nodes.agentnode import _format_conversation, _latest_human_content, _parse_response, _run_stream
@@ -189,10 +189,9 @@ class TestUpdateContextMemory(unittest.TestCase):
         cm = update_context_memory(cm, key="b", content=_tokens_of_chars(40), budget=budget)
         cm = update_context_memory(cm, key="c", content=_tokens_of_chars(40), budget=budget)
         keys = [e["key"] for e in cm["entries"]]
-        self.assertIn("a", keys)
-        self.assertEqual(cm["entries"][0]["from_token"], 20)
+        self.assertNotIn("a", keys)
         self.assertIn("c", keys)
-        self.assertLessEqual(cm["used_tokens"], budget)
+        self.assertLessEqual(count_tokens(toons.dumps(cm))["input"], budget)
 
     def test_exact_budget_fit_clears_others(self):
         budget = 50
@@ -203,7 +202,8 @@ class TestUpdateContextMemory(unittest.TestCase):
             cm, key="new", content=_tokens_of_chars(50), budget=budget
         )
         self.assertEqual([e["key"] for e in cm["entries"]], ["new"])
-        self.assertEqual(cm["used_tokens"], 50)
+        self.assertLess(cm["used_tokens"], 50)  # rendered metadata uses part of the quota
+        self.assertLessEqual(count_tokens(toons.dumps(cm))["input"], budget)
 
     def test_same_key_replaced_not_duplicated(self):
         text = _tokens_of_chars(200)
@@ -222,7 +222,7 @@ class TestUpdateContextMemory(unittest.TestCase):
         self.assertEqual(e["from_token"], 100)
         self.assertEqual(e["to_token"], 150)
         self.assertEqual(e["total_tokens"], 300)
-        self.assertFalse(cm["truncated"])
+        self.assertTrue(cm["truncated"])
 
     def test_requested_range_larger_than_budget_sets_truncated(self):
         text = _tokens_of_chars(10000)
@@ -306,8 +306,7 @@ class TestIndexAndSlimHistory(unittest.TestCase):
         slim = slim_execution_history(hist)
         self.assertEqual(len(slim), 1)
         self.assertNotIn("result", slim[0])
-        self.assertEqual(slim[0]["key"], "tool_1")
-        self.assertGreater(slim[0]["tokens"], 0)
+        self.assertEqual(slim[0], {"task": "load", "success": True, "status": "completed"})
 
     def test_slim_history_skips_non_dicts(self):
         self.assertEqual(slim_execution_history(["x", None, 1]), [])
@@ -337,7 +336,7 @@ class TestContextSelectorNode(unittest.TestCase):
         out = context_selector_node(self._state())
         self.assertIn("context_memory", out)
         self.assertEqual(out["context_memory"]["entries"][0]["key"], "tool_1")
-        self.assertEqual(len(out), 1)  # only context_memory returned
+        self.assertEqual(out["next_step"], {})
 
     def test_token_range(self):
         out = context_selector_node(
@@ -408,36 +407,94 @@ class TestContextSelectorNode(unittest.TestCase):
         self.assertEqual(len([e for e in entries if e["key"] == "tool_1"]), 1)
         self.assertEqual(entries[-1]["from_token"], 80)
 
+    def test_records_selection_history_and_summary(self):
+        out = context_selector_node(self._state(next_step={"key": "tool_1", "from_token": 10, "to_token": 20}))
+        self.assertIn("context_selection_history", out)
+        self.assertEqual(out["context_selection_history"][-1]["key"], "tool_1")
+        self.assertEqual(out["context_selection_summary"]["selection_count"], 1)
+        self.assertFalse(out["context_selection_summary"]["loop_detected"])
+        self.assertEqual(out["execution_history"][-1]["type"], "context_select")
+
+
+class TestContextSelectionSummary(unittest.TestCase):
+    def test_loop_summary_detects_two_window_ping_pong(self):
+        history = []
+        for _ in range(3):
+            history, _ = record_context_selection(
+                history,
+                key="tool_1",
+                from_token=0,
+                to_token=100,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=300,
+            )
+            history, summary = record_context_selection(
+                history,
+                key="tool_1",
+                from_token=100,
+                to_token=200,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=300,
+            )
+        self.assertTrue(summary["loop_detected"])
+        self.assertIn("repeated", summary["reason"])
+        self.assertEqual(summary["selection_count"], 6)
+
+    def test_loop_summary_detects_same_window_repeated(self):
+        summary = summarize_context_selection_history(
+            [
+                {"key": "tool_1", "from_token": 0, "to_token": 50, "loaded_tokens": 50, "found": True},
+                {"key": "tool_1", "from_token": 0, "to_token": 50, "loaded_tokens": 50, "found": True},
+                {"key": "tool_1", "from_token": 0, "to_token": 50, "loaded_tokens": 50, "found": True},
+            ]
+        )
+        self.assertTrue(summary["loop_detected"])
+        self.assertIn("same context window", summary["reason"])
+
+    def test_loop_summary_reports_global_repeated_windows(self):
+        history = []
+        for key in ("tool_1", "tool_2", "tool_3", "tool_4"):
+            history, _ = record_context_selection(
+                history,
+                key=key,
+                from_token=0,
+                to_token=100,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=500,
+            )
+        for _ in range(3):
+            history, summary = record_context_selection(
+                history,
+                key="tool_1",
+                from_token=0,
+                to_token=100,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=500,
+            )
+        self.assertTrue(summary["loop_detected"])
+        self.assertIn("across the run", summary["reason"])
+        self.assertEqual(summary["repeated_windows_global"][0]["key"], "tool_1")
+
 
 class TestRouting(unittest.TestCase):
     def test_armory(self):
-        self.assertEqual(route_from_agent({"next_step": {"action": "armory"}}), ARMORY_NODE)
+        state = {"dispatch_target": "execute", "planned_phase_index": 0,
+                 "planned_phases": [{"sequence": 1, "steps": [{"id": "a", "action": "command",
+                     "command": {"action": "armory"}, "task": "", "name": ""}]}]}
+        self.assertEqual(dispatch_execution(state)[0].node, ARMORY_NODE)
 
     def test_child_agent(self):
-        self.assertEqual(
-            route_from_agent({"next_step": {"action": "child_agent"}}), CHILD_AGENT_NODE
-        )
+        state = {"dispatch_target": "execute", "planned_phase_index": 0,
+                 "planned_phases": [{"sequence": 1, "steps": [{"id": "a", "action": "command",
+                     "command": {"action": "child_agent"}, "task": "", "name": ""}]}]}
+        self.assertEqual(dispatch_execution(state)[0].node, CHILD_AGENT_NODE)
 
     def test_context_select(self):
-        self.assertEqual(
-            route_from_agent({"next_step": {"action": "context_select"}}),
-            CONTEXT_SELECTOR_NODE,
-        )
-
-    def test_finish(self):
-        self.assertEqual(route_from_agent({"next_step": {"action": "finish"}}), END)
-
-    def test_missing_next_step_ends(self):
-        self.assertEqual(route_from_agent({}), END)
-
-    def test_unknown_action_ends(self):
-        self.assertEqual(route_from_agent({"next_step": {"action": "nope"}}), END)
-
-    def test_input_gate_reuses_action_map(self):
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "armory"}}), ARMORY_NODE)
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "child_agent"}}), CHILD_AGENT_NODE)
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "context_select"}}), CONTEXT_SELECTOR_NODE)
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "finish"}}), END)
+        self.assertEqual(dispatch_execution({"dispatch_target": CONTEXT_SELECTOR_NODE}), CONTEXT_SELECTOR_NODE)
 
 
 class TestAgentParseResponse(unittest.TestCase):
@@ -610,6 +667,7 @@ class TestPromptLoader(unittest.TestCase):
             execution_history=hist,
             execution_memory_index=index,
             context_memory=cm,
+            context_selection_summary={"selection_count": 1, "loop_detected": False},
             turn_start=False,
         )
         self.assertIn("execution_memory_index", user)
@@ -633,6 +691,7 @@ class TestPromptLoader(unittest.TestCase):
             execution_history=[],
             execution_memory_index=[],
             context_memory=empty_context_memory(),
+            context_selection_summary={},
             turn_start=True,
         )
         self.assertIn("session_intent", user)
@@ -718,6 +777,7 @@ class TestToonTokenSavings(unittest.TestCase):
             execution_history=slim_execution_history([]),
             execution_memory_index=index,
             context_memory=empty_context_memory(),
+            context_selection_summary={},
         )
         self.assertIn("[2]{key,type,name,task,total_tokens,in_context}:", user)
         self.assertNotIn('{\n  "key": "tool_1"', user)
@@ -726,32 +786,52 @@ class TestToonTokenSavings(unittest.TestCase):
 class TestArmoryIngest(unittest.TestCase):
     def test_armory_result_is_recorded_and_ingested(self):
         from src.agent.nodes.armory_node import armory_node
+        from src.agent.nodes.output_security_gate import output_security_gate_node
 
         with patch("src.agent.nodes.armory_node.Armory.get", return_value=MagicMock(confirmation_required=False)), \
              patch("src.agent.nodes.armory_node.Armory.call", return_value=({"success": True, "value": "done"}, None)):
-            out = armory_node({
+            state = {
                 "next_step": {"action": "armory", "resource_type": "tool",
-                              "resource_name": "lookup", "arguments": {"q": "x"}, "task": "once"},
+                              "resource_name": "lookup", "arguments": {"q": "x"}, "task": "once",
+                              "action_id": "run:action:1"},
                 "execution_history": [], "execution_memory": {},
                 "context_memory": empty_context_memory(), "current_task": "once",
-            })
+                "dispatch_step": {"id": "run:action:1", "sequence": 1, "action": "armory",
+                                  "task": "once", "name": "lookup"},
+                "planned_phases": [{"sequence": 1, "steps": [{"id": "run:action:1"}]}],
+                "planned_phase_index": 0,
+            }
+            from src.agent.nodes.result_collector import result_collector_node
+            branch = armory_node(state)
+            out = output_security_gate_node({**state, **branch,
+                                             **result_collector_node({**state, **branch})})
         self.assertTrue(out["execution_history"][-1]["success"])
         self.assertEqual(out["execution_history"][-1]["resource"], "armory.tool.lookup")
-        self.assertIn("armory_1", out["execution_memory"])
+        self.assertIn("execution:phase:1:step:run:action:1", out["execution_memory"])
 
     def test_armory_oversized_result_truncates_in_context(self):
         from src.agent.nodes.armory_node import armory_node
+        from src.agent.nodes.output_security_gate import output_security_gate_node
 
         huge = _tokens_of_chars(CONTEXT_MEMORY_BUDGET + 100)
         with patch("src.agent.nodes.armory_node.Armory.get", return_value=MagicMock(confirmation_required=False)), \
              patch("src.agent.nodes.armory_node.Armory.call", return_value=(huge, None)):
-            out = armory_node({
+            state = {
                 "next_step": {"action": "armory", "resource_type": "tool",
-                              "resource_name": "huge", "arguments": {}, "task": "t"},
+                              "resource_name": "huge", "arguments": {}, "task": "t",
+                              "action_id": "run:action:1"},
                 "execution_history": [], "execution_memory": {},
                 "context_memory": empty_context_memory(), "current_task": "t",
-            })
-        self.assertEqual(out["execution_memory"]["armory_1"]["result"], huge)
+                "dispatch_step": {"id": "run:action:1", "sequence": 1, "action": "armory",
+                                  "task": "t", "name": "huge"},
+                "planned_phases": [{"sequence": 1, "steps": [{"id": "run:action:1"}]}],
+                "planned_phase_index": 0,
+            }
+            from src.agent.nodes.result_collector import result_collector_node
+            branch = armory_node(state)
+            out = output_security_gate_node({**state, **branch,
+                                             **result_collector_node({**state, **branch})})
+        self.assertEqual(out["execution_memory"]["execution:phase:1:step:run:action:1"]["result"], huge)
         self.assertTrue(out["context_memory"]["truncated"])
 
     def test_fifo_trims_only_needed_prefix(self):
@@ -759,9 +839,9 @@ class TestArmoryIngest(unittest.TestCase):
         cm = update_context_memory(cm, key="a", content=_tokens_of_chars(70), budget=100)
         cm = update_context_memory(cm, key="b", content=_tokens_of_chars(50), budget=100)
         self.assertEqual([entry["key"] for entry in cm["entries"]], ["a", "b"])
-        self.assertEqual(cm["entries"][0]["from_token"], 20)
+        self.assertGreater(cm["entries"][0]["from_token"], 20)
         self.assertFalse(cm["entries"][0]["complete"])
-        self.assertEqual(cm["used_tokens"], 100)
+        self.assertLessEqual(count_tokens(toons.dumps(cm))["input"], 100)
 
 
 class TestGraphWiring(unittest.TestCase):

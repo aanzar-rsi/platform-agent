@@ -23,6 +23,7 @@ def _iso(value: Any) -> str | None:
 
 def _row_to_server(row: dict[str, Any]) -> dict[str, Any]:
     metadata = row.get("metadata") or {}
+    auth = metadata.get("_auth")
     return {
         "id": str(row["server_id"]),
         "name": row["name"],
@@ -33,7 +34,8 @@ def _row_to_server(row: dict[str, Any]) -> dict[str, Any]:
         "args": metadata.get("args", []),
         "env": metadata.get("env", {}),
         "enabled": metadata.get("enabled", True),
-        "metadata": metadata,
+        "metadata": {key: value for key, value in metadata.items() if key != "_auth"},
+        "_auth": auth,
         "created_at": _iso(row.get("created_at")),
         "updated_at": _iso(row.get("created_at")),
     }

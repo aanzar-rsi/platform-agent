@@ -90,20 +90,16 @@ def handle_step(renderer: TurnRenderer, step: dict) -> dict | None:
         renderer.pause()
         return payload if isinstance(payload, dict) else {"value": payload}
 
-    if node == "plan_dispatcher":
+    if node == "execution_dispatcher":
         event = updates.get("plan_event") or {}
         renderer.set_status(f"Phase {event.get('sequence', '?')}: {len(event.get('steps') or [])} step(s)...")
         return None
-    if node == "phase_collector":
-        event = updates.get("plan_event") or {}
-        renderer.set_status(f"Phase {event.get('sequence', '?')} {'failed' if event.get('failed') else 'complete'}")
+    if updates.get("plan_created"):
+        plan = updates["plan_created"]
+        renderer.set_status(f"Planned {plan['step_count']} step(s) in {len(plan['phases'])} phase(s)")
         return None
 
     if node == AGENT_NODE:
-        if updates.get("plan_created"):
-            plan = updates["plan_created"]
-            renderer.set_status(f"Planned {plan['step_count']} step(s) in {len(plan['phases'])} phase(s)")
-            return None
         next_step = updates.get("next_step") or {}
         action = next_step.get("action")
         renderer.planner_decision(
@@ -121,18 +117,18 @@ def handle_step(renderer: TurnRenderer, step: dict) -> dict | None:
             renderer.subagent_call(next_step.get("resource_name", ""), next_step.get("task", ""))
         else:
             renderer.set_status("Thinking...")
-    elif node == ARMORY_NODE:
-        hist = updates.get("execution_history") or []
-        entry = hist[-1] if hist else {}
-        result = entry.get("result") or {}
-        ok = not (isinstance(result, dict) and result.get("success") is False)
-        if entry.get("resource_type") == "subagent":
-            renderer.subagent_done(entry.get("resource_name") or "")
-        else:
-            renderer.tool_result(entry.get("resource_name") or "", ok=ok,
-                                 error=None if ok else result.get("error"), result=result)
     elif node == OUTPUT_SECURITY_GATE_NODE:
-        renderer.set_status("Running output security checks...")
+        for event in updates.get("output_events") or []:
+            payload = event.get("payload") or {}
+            if event.get("kind") == "tool.finished":
+                result = payload.get("result")
+                renderer.tool_result(payload.get("tool_name") or "", ok=payload.get("success", True),
+                                     error=(result.get("error") if isinstance(result, dict) and not payload.get("success", True) else None),
+                                     result=result)
+            elif event.get("kind") == "subagent.finished":
+                renderer.subagent_done(payload.get("agent_name") or "")
+            elif event.get("kind") == "plan.phase.finished":
+                renderer.set_status(f"Phase {payload.get('sequence', '?')} {'failed' if payload.get('failed') else 'complete'}")
     elif node == CONTEXT_SELECTOR_NODE:
         renderer.set_status("Loading context window...")
     else:

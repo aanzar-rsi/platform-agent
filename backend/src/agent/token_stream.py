@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 TokenCallback = Callable[[str, str], None]  # (text, channel)
 UsageCallback = Callable[[dict[str, Any]], None]
 CacheHitCallback = Callable[[dict[str, Any]], None]
+LifecycleCallback = Callable[[str, dict[str, Any]], None]
 
 _token_callback: ContextVar[Optional[TokenCallback]] = ContextVar(
     "eva_token_callback", default=None
@@ -17,6 +18,9 @@ _usage_callback: ContextVar[Optional[UsageCallback]] = ContextVar(
 )
 _cache_hit_callback: ContextVar[Optional[CacheHitCallback]] = ContextVar(
     "eva_cache_hit_callback", default=None
+)
+_lifecycle_callback: ContextVar[Optional[LifecycleCallback]] = ContextVar(
+    "eva_llm_lifecycle_callback", default=None
 )
 
 
@@ -43,6 +47,14 @@ def set_cache_hit_callback(callback: Optional[CacheHitCallback]):
 
 def reset_cache_hit_callback(token) -> None:
     _cache_hit_callback.reset(token)
+
+
+def set_lifecycle_callback(callback: Optional[LifecycleCallback]):
+    return _lifecycle_callback.set(callback)
+
+
+def reset_lifecycle_callback(token) -> None:
+    _lifecycle_callback.reset(token)
 
 
 def emit_token(text: str, channel: str = "output") -> None:
@@ -78,5 +90,17 @@ def emit_cache_hit(payload: dict[str, Any]) -> None:
         from langgraph.config import get_stream_writer
 
         get_stream_writer()({"type": "llm.cache_hit", **payload})
+    except Exception:
+        pass
+
+
+def emit_lifecycle(event: str, payload: dict[str, Any]) -> None:
+    callback = _lifecycle_callback.get()
+    if callback is not None:
+        callback(event, payload)
+    try:
+        from langgraph.config import get_stream_writer
+
+        get_stream_writer()({"type": event, **payload})
     except Exception:
         pass

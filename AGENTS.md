@@ -17,3 +17,12 @@
 - This repository reserves `graphify-out/` for a project-wide knowledge graph.
 - Prefer graph queries over broad source searches when `graphify-out/graph.json` exists.
 - `backend/` maintains its own graph at `backend/graphify-out/`.
+
+## Changelog Maintenance
+
+- For every codebase change, always update both files in `/documentation`:
+  - `/documentation/changelogs_highlevel`
+  - `/documentation/changelogs_lowlevel`
+- Every entry must include the date and time (ISO-8601 format).
+- `changelogs_highlevel` must capture feature-level or high-level change summaries.
+- `changelogs_lowlevel` must capture implementation-level details of what changed.

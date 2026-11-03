@@ -221,11 +221,12 @@ def build_config(
     *,
     owner_id: str = "local-user",
     checkpoint_id: str | None = None,
-    max_loops: int = 50,
     execution_id: str | None = None,
     runtime: dict[str, Any] | None = None,
 ) -> RunnableConfig:
-    max_loops = int((runtime or {}).get("max_loops", max_loops))
+    from src.config import settings
+
+    max_loops = settings.resolve_max_loops(runtime)
     configurable: dict[str, Any] = {
         "thread_id": agent_id,
         "checkpoint_ns": "",
@@ -547,7 +548,8 @@ def initial_state_for_thread(
     human = HumanMessage(content=query)
     if thread_has_state(thread_id):
         return {"messages": [human], "planned_phases": [], "planned_phase_index": 0,
-                "plan_created": {}, "plan_event": {}, "step_events": [], "phase_step_results": []}
+                "plan_created": {}, "plan_event": {}, "step_events": [], "step_results": [],
+                "executor_output": {}, "output_events": [], "dispatch_target": ""}
     return {
         "messages": [human],
         "execution_history": [],
@@ -558,6 +560,8 @@ def initial_state_for_thread(
             "truncated": False,
             "entries": [],
         },
+        "context_selection_history": [],
+        "context_selection_summary": {},
         "current_task": "",
         "next_step": {},
         "preloaded_context": preloaded_context or {},
@@ -567,7 +571,14 @@ def initial_state_for_thread(
         "plan_created": {},
         "plan_event": {},
         "step_events": [],
-        "phase_step_results": [],
+        "step_results": [],
+        "action_sequence": 0,
+        "executor_output": {},
+        "output_events": [],
+        "dispatch_target": "",
+        "dispatch_step": {},
+        "pending_context_selection": {},
+        "human_request_kind": "",
     }
 
 
@@ -617,7 +628,6 @@ def run_turn(
         owner_id=owner_id,
         checkpoint_id=None if is_resume else checkpoint_id,
         execution_id=resolved_execution_id,
-        max_loops=int((runtime or {}).get("max_loops", 50)),
         runtime=runtime,
     )
     if is_resume:

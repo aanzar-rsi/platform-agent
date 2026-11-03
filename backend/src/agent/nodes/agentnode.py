@@ -33,6 +33,8 @@ from src.agent.facets import Armory
 # stalling the entire turn by tens of seconds.
 _EXPERIENCE_TIMEOUT_SECONDS = 4.0
 _experience_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="learned-exp")
+_CHILD_MAX_HISTORY_STEPS = 48
+_CHILD_MAX_CONTEXT_SELECTIONS = 18
 
 
 def _safe_learned_experiences(
@@ -40,6 +42,7 @@ def _safe_learned_experiences(
     execution_history: list,
     *,
     uid: str | None = None,
+    available_resources: set[tuple[str, str]] | None = None,
 ) -> str:
     """Retrieve experience chunks; never raise into the agent loop and never
     block it for more than a few seconds."""
@@ -58,7 +61,8 @@ def _safe_learned_experiences(
 
         future = _experience_executor.submit(copy_context().run, retrieve_experiences,
                                              user_query, prior_task=prior_task,
-                                             prior_tool=prior_tool, uid=uid)
+                                             prior_tool=prior_tool, execution_history=execution_history,
+                                             available_resources=available_resources, uid=uid)
         try:
             chunks = future.result(timeout=_EXPERIENCE_TIMEOUT_SECONDS)
         except FutureTimeoutError:
@@ -395,14 +399,31 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
     user_query = _latest_human_content(messages)
 
     execution_history = state.get("execution_history", [])
+    configurable = (config or {}).get("configurable") or {}
+    child_mode = bool(configurable.get("child_agent_id"))
+    if child_mode:
+        context_select_count = sum(1 for entry in execution_history if entry.get("type") == "context_select")
+        if context_select_count >= _CHILD_MAX_CONTEXT_SELECTIONS or len(execution_history) >= _CHILD_MAX_HISTORY_STEPS:
+            answer = (
+                "I stopped this child-agent run because it reached the execution safety budget "
+                "without converging on a final answer. "
+                "Please narrow the task or ask me to return the best available partial findings."
+            )
+            return {
+                "current_task": "finish",
+                "next_step": {"action": "finish", "answer": answer},
+                "messages": [AIMessage(content=answer)],
+                "planned_phases": [],
+                "planned_phase_index": 0,
+            }
 
     pending_children = _pending_children(execution_history)
     has_child_history = any(entry.get("type") == "child_agent" for entry in execution_history)
     execution_memory = state.get("execution_memory", {})
     context_memory = state.get("context_memory") or empty_context_memory()
+    context_selection_summary = state.get("context_selection_summary") or {}
     preloaded = state.get("preloaded_context") or {}
 
-    configurable = (config or {}).get("configurable") or {}
     uid = configurable.get("owner_id")
 
     # The newest top-level request stays direct. Older top-level human inputs
@@ -425,12 +446,17 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
         )
 
     if injected_note:
-        key = f"human_pause_{len(execution_memory) + 1}"
-        execution_memory, context_memory, _ = record_execution(
-            execution_memory, context_memory, key=key, value=injected_note,
-            description="User instruction supplied while agent was paused",
-            entry_type="human_input", name="user", task="Pause instruction",
-        )
+        from src.agent.nodes.output_security_gate import sanitize_executor_output
+
+        execution_id = str(configurable.get("execution_id") or "execution")
+        return {"executor_output": sanitize_executor_output({
+            "version": 1, "action_id": f"{execution_id}:agent-pause:{len(messages)}",
+            "source": "human_input", "results": [{
+                "kind": "human_input", "value": injected_note, "success": True,
+                "task": "Pause instruction", "description": "User instruction supplied while agent was paused",
+                "metadata": {"input_kind": "paused"},
+            }],
+        })}
 
     # Child IDs are runtime-generated, so the deterministic next action is to
     # collect pending children before asking the planner to decide anything else.
@@ -445,27 +471,23 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
             },
             "messages": [AIMessage(content=f"Collecting child {child_id}", additional_kwargs={"ui_hidden": True})],
         }
-        if injected_note:
-            update["messages"] = [
-                HumanMessage(
-                    content=injected_note,
-                    additional_kwargs={
-                        "ui_hidden": True,
-                        "ui_step": {"type": "reasoning", "content": f"User response: {injected_note}"},
-                    },
-                )
-            ] + update["messages"]
         if execution_memory is not original_execution_memory:
             update.update(execution_memory=execution_memory, context_memory=context_memory)
         return update
-
-    learned = _safe_learned_experiences(user_query, execution_history, uid=uid) if uid else "(none)"
 
     effective_armory = (configurable.get("policy") or {}).get("armory") or {}
     resources = Armory(effective_armory, user_id=uid,
                        preloaded_context=state.get("preloaded_context")).list(reconnect=True)
     tools = [resource for resource in resources if resource.type == "tool"]
     subagents = [resource for resource in resources if resource.type == "subagent"]
+    available_resources = {(resource.type, resource.name) for resource in resources}
+    available_resources.update(
+        ("mcp_server", resource.name) for resource in resources
+        if resource.type == "tool" and resource.name.startswith("mcp_")
+    )
+    learned = _safe_learned_experiences(
+        user_query, execution_history, uid=uid, available_resources=available_resources,
+    ) if uid else "(none)"
 
     first_request = sum(getattr(message, "type", None) == "human" for message in messages) == 1 and not execution_history
     use_fast_prompt = first_request or len((user_query or "").strip()) < 10
@@ -483,6 +505,7 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
             tools=tools,
             subagents=subagents,
             conversation=conversation_text,
+            learned_experiences=learned,
         )
     else:
         system_prompt, prompt = planner_agent_prompt_loader(
@@ -492,11 +515,13 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
             execution_history=slim_execution_history(execution_history),
             execution_memory_index=build_execution_memory_index(execution_memory, context_memory),
             context_memory=context_memory,
+            context_selection_summary=context_selection_summary,
             conversation=conversation_text,
             current_task=state.get("current_task", ""),
             max_plan_steps=int(configurable.get("max_plan_steps") or 8),
             child_mode=bool(configurable.get("child_agent_id")),
             planner_error=state.get("planner_error"),
+            learned_experiences=learned,
         )
 
     if traced:
@@ -598,6 +623,36 @@ def agent_node(state: PlanExecuteState, config: RunnableConfig | None = None) ->
                 },
             )
         ] + list(update.get("messages", []))
+
+    loop_summary = state.get("context_selection_summary") or {}
+    next_step = update.get("next_step") or {}
+    if loop_summary.get("loop_detected") and next_step.get("action") == "context_select":
+        key = str(next_step.get("key") or "")
+        from_token = _coerce_int(next_step.get("from_token"), 0) or 0
+        to_token = _coerce_int(next_step.get("to_token"), None)
+        repeated = {
+            (
+                str(item.get("key") or ""),
+                int(item.get("from_token") or 0),
+                None if item.get("to_token") is None else _coerce_int(item.get("to_token"), None),
+            )
+            for item in ((loop_summary.get("repeated_windows") or []) + (loop_summary.get("repeated_windows_global") or []))
+            if isinstance(item, dict)
+        }
+        if (key, from_token, to_token) in repeated:
+            reason = loop_summary.get("reason") or "repeated context selection detected"
+            answer = (
+                "I could not complete this request because planning entered a repeated context-selection loop "
+                f"({reason}). I already loaded this result window multiple times. "
+                "Please try narrowing the request or ask me to continue from the next token window."
+            )
+            update.update(
+                current_task="finish",
+                next_step={"action": "finish", "answer": answer},
+                messages=[AIMessage(content=answer)],
+                planned_phases=[],
+                planned_phase_index=0,
+            )
 
     if execution_memory is not original_execution_memory and "execution_memory" not in update:
         update.update(execution_memory=execution_memory, context_memory=context_memory)

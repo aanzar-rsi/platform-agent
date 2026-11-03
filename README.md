@@ -19,11 +19,9 @@ v2/
 └─ README.md
 ```
 
-## Quick Start
+## Setup with Docker
 
-### Docker Compose (recommended)
-
-#### Prerequisites
+### Prerequisites
 
 - Docker Engine or Docker Desktop
 - Docker Compose v2 (`docker compose version`)
@@ -31,7 +29,7 @@ v2/
 The stack includes PostgreSQL, a one-time database schema setup service, the
 FastAPI backend, and the compiled Vite frontend.
 
-#### 1) Configure the environment
+### 1) Configure the environment
 
 ```bash
 cp .env.example .env
@@ -46,7 +44,7 @@ Edit `.env` before using the stack:
   `VITE_WS_URL=ws://localhost:5000` when opening the frontend on the same
   machine.
 
-#### 2) Build and start the stack
+### 2) Build and start the stack
 
 ```bash
 docker compose up --build -d
@@ -68,7 +66,7 @@ docker compose logs backend
 docker compose logs frontend
 ```
 
-#### 3) Create the sample application user
+### 3) Create the sample application user
 
 Database initialization creates the schema but does not create an application
 login. Create the sample user defined in `scripts/create_user.py`:
@@ -87,19 +85,16 @@ Edit `scripts/create_user.py` before running the command if you want different
 initial credentials. The script creates a single user and will report a unique
 constraint error if that username or email already exists.
 
-#### 4) Open and verify the application
+### 4) Open and verify the application
 
 - Frontend: `http://localhost:5173`
 - Backend liveness: `http://localhost:5000/v1/live`
 - PostgreSQL: host port `5432` by default
 
-The liveness endpoint should return:
+The liveness endpoint returns `ok: true` and reports dependency status. Check
+that `dependencies.postgres` is `true` and `status` is `ok`.
 
-```json
-{"ok": true}
-```
-
-#### Common operations
+### Common operations
 
 ```bash
 docker compose ps
@@ -138,26 +133,39 @@ Chroma dependencies. Later starts reuse built images and named volumes. Set
 port is occupied. If `BACKEND_PORT` changes, update `VITE_API_URL` and
 `VITE_WS_URL`, then rebuild the frontend image.
 
-### Manual setup
+## To setup without Docker
 
-#### 1) Backend setup
+### 1) Install dependencies
 
-From `backend/`:
+Backend (from `backend/`):
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt -r api/requirements.txt
+.venv/bin/pip install -r requirements.txt
 ```
 
-#### 2) Frontend setup
-
-From `frontend/`:
+Frontend (from `frontend/`):
 
 ```bash
 npm install
 ```
 
-#### 3) Run both apps
+### 2) Run first-time setup (database + test user)
+
+From repo root:
+
+```bash
+backend/.venv/bin/python scripts/firsttime_setup.py
+```
+
+This will:
+
+- print setup/install checklist reminders,
+- create/verify PostgreSQL database and schema,
+- prompt for test login credentials and create/update the user,
+- print final bring-up checklist.
+
+### 3) Run both apps
 
 From repo root:
 

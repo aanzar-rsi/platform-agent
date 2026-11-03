@@ -92,8 +92,8 @@ class TestHandleStep(unittest.TestCase):
     def test_tool_result_success(self):
         renderer = TurnRenderer(make_console(), live=False)
         renderer.tool_call("web_search", {"query": "x"}, "Find x")
-        step = {"armory_node": {"execution_history": [{"type": "armory", "resource_type": "tool",
-                                                         "resource_name": "web_search", "result": {"success": True}}]}}
+        step = {"output_security_gate": {"output_events": [{"kind": "tool.finished", "payload": {
+            "tool_name": "web_search", "result": {"success": True}, "success": True}}]}}
         handle_step(renderer, step)
         self.assertTrue(renderer.lines[0].startswith("[OK] "))
         output = renderer.console.file.getvalue()
@@ -102,9 +102,9 @@ class TestHandleStep(unittest.TestCase):
 
     def test_tool_result_failure_surfaces_error(self):
         renderer = TurnRenderer(make_console(), live=False)
-        step = {"armory_node": {"execution_history": [{"type": "armory", "resource_type": "tool",
-                                                         "resource_name": "execute_bash",
-                                                         "result": {"success": False, "error": "boom"}}]}}
+        step = {"output_security_gate": {"output_events": [{"kind": "tool.finished", "payload": {
+            "tool_name": "execute_bash", "result": {"success": False, "error": "boom"},
+            "success": False}}]}}
         handle_step(renderer, step)
         self.assertTrue(renderer.lines[0].startswith("[FAILED] "))
         self.assertIn("boom", renderer.lines[0])
@@ -207,7 +207,7 @@ class TestHumanInputNode(unittest.TestCase):
             {"next_step": {"question": "Which city?", "options": ["City and Country"]}},
             config={"configurable": {"thread_id": "chat-1"}},
         )
-        self.assertEqual(result["messages"][0].content, "Hyderabad")
+        self.assertEqual(result["step_results"][0]["results"][0]["value"], "Hyderabad")
         self.assertEqual(interrupt_mock.call_count, 1)
 
 

@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from langchain_core.messages import HumanMessage
 
 from src.agent.nodes import agentnode
+from src.config import settings
 from src.utils.postgres_checkpointer import build_config
 
 
@@ -22,6 +23,16 @@ class TestRuntimeControls(unittest.TestCase):
         config = build_config("chat", runtime={"model_id": "gpt-4.1", "max_loops": 7})
         self.assertEqual(config["configurable"]["model_id"], "gpt-4.1")
         self.assertEqual(config["recursion_limit"], 7)
+
+    def test_build_config_uses_env_default_without_saved_preference(self):
+        with patch.object(settings, "max_loops", 500):
+            config = build_config("chat", runtime={"model_id": "gpt-4.1"})
+            self.assertEqual(config["recursion_limit"], 500)
+            self.assertEqual(config["configurable"]["max_loops"], 500)
+
+    def test_build_config_uses_env_default_without_runtime(self):
+        with patch.object(settings, "max_loops", 500):
+            self.assertEqual(build_config("chat")["recursion_limit"], 500)
 
     @patch.object(agentnode, "_safe_learned_experiences", return_value="")
     @patch.object(agentnode, "call_llm_stream")

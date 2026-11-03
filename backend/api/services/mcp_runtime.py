@@ -25,6 +25,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 import httpx
+from api.services.mcp_auth import McpBearerAuth
 
 logger = logging.getLogger(__name__)
 TIMEOUT = 15
@@ -33,7 +34,8 @@ RECONNECT_DELAY = 30
 
 
 class McpConnection:
-    def __init__(self, server: dict[str, Any]) -> None:
+    def __init__(self, uid: str, server: dict[str, Any]) -> None:
+        self.uid = uid
         self.server = server
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"mcp-{server['id']}")
@@ -91,10 +93,10 @@ class McpConnection:
             elif self.server.get("transport") == "sse" or (
                 not self.server.get("transport") and self.server["url"].rstrip("/").endswith("/sse")
             ):
-                transport = sse_client(self.server["url"], timeout=TIMEOUT)
+                transport = sse_client(self.server["url"], timeout=TIMEOUT, auth=self._http_auth())
                 self.tools = await self._open_session(transport)
             else:
-                client = await self.stack.enter_async_context(httpx.AsyncClient(timeout=TIMEOUT))
+                client = await self.stack.enter_async_context(httpx.AsyncClient(timeout=TIMEOUT, auth=self._http_auth()))
                 transport = streamable_http_client(self.server["url"], http_client=client)
                 self.tools = await self._open_session(transport)
             self.stopping = asyncio.Event()
@@ -113,6 +115,19 @@ class McpConnection:
                 logger.debug("MCP transport cleanup after failure: %s", exc)
             self.session = None
             self.stack = None
+
+    def _http_auth(self) -> McpBearerAuth | None:
+        if not self.server.get("_auth"):
+            return None
+
+        def save_token(auth: dict[str, Any]) -> None:
+            self.server["_auth"] = auth
+            from api.core.deps import get_repos
+            current = get_repos().mcp.get(self.uid, self.server["id"])
+            if current:
+                get_repos().mcp.update(self.uid, self.server["id"], metadata={**current["metadata"], "_auth": auth})
+
+        return McpBearerAuth(self.server, save_token)
 
     async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if self.session is None:
@@ -149,9 +164,10 @@ class McpConnection:
                 self.loop.call_soon_threadsafe(self.stopping.set)
             if self.worker:
                 self.worker.result(timeout=5)
-        except Exception:
-            if self.ready.done() and self.ready.exception() is None:
-                logger.exception("Failed to close MCP session %s", self.server["id"])
+        except BaseException as exc:
+            # anyio cancellation scopes may report cancellation while a stale
+            # HTTP transport is shutting down; cleanup must not block reconnect.
+            logger.debug("MCP session cleanup for %s: %s", self.server["id"], exc)
         finally:
             self.session = None
             self.loop.call_soon_threadsafe(self.loop.stop)
@@ -185,7 +201,7 @@ class McpRuntime:
             stale = self._connections.pop(key, None)
             if stale:
                 stale.close()
-            conn = McpConnection(server)
+            conn = McpConnection(uid, server)
             conn.thread.start()
             conn.worker = asyncio.run_coroutine_threadsafe(conn._serve(), conn.loop)
             try:

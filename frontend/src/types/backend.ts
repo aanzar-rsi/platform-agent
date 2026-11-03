@@ -47,6 +47,14 @@ export interface ToolCallEvent {
 
 export type SubagentProgressKind = 'status' | 'reasoning' | 'log' | 'card' | 'test_plan' | 'test_results';
 
+export interface ChildExecutionDetail {
+  resource_type?: 'tool' | 'subagent' | string;
+  resource_name?: string;
+  arguments?: unknown;
+  result?: unknown;
+  success?: boolean;
+}
+
 export interface AgentCardPermissions {
   read?: boolean;
   write?: boolean;
@@ -99,6 +107,7 @@ export interface SubagentProgressEvent {
   detail?: unknown;
   /** True once a reasoning block has finished streaming (no more deltas coming). */
   reasoningDone?: boolean;
+  action_id?: string;
 }
 
 export interface SubagentCallEvent {
@@ -115,12 +124,13 @@ export interface SubagentCallEvent {
   startedAt?: number;
   /** Client-side timestamp (ms) when the subagent finished. */
   endedAt?: number;
+  executions?: ChildExecutionDetail[];
 }
 
 export type ChildAgentCallEvent = SubagentCallEvent;
 
 export type AgentStep =
-  | { type: 'reasoning'; content: string }
+  | { type: 'reasoning'; content: string; done?: boolean }
   | { type: 'tool'; tool: ToolCallEvent }
   | { type: 'subagent'; subagent: SubagentCallEvent }
   | { type: 'child_agent'; child: ChildAgentCallEvent };

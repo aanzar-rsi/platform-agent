@@ -8,9 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY backend/requirements.txt ./requirements.txt
-COPY backend/api/requirements.txt ./api/requirements.txt
 RUN pip install --upgrade pip \
-    && pip install -r requirements.txt -r api/requirements.txt
+    && pip install -r requirements.txt
 
 COPY backend/ .
 COPY scripts/db_setup.py ./scripts/db_setup.py

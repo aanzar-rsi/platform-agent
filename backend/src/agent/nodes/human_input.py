@@ -9,11 +9,11 @@ as a HumanMessage and control returns to `agent_node` to continue planning.
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage
 from langgraph.types import interrupt
 
-from src.agent.control import note_text_from_resume
-from src.agent.memory import record_human_input
+from src.agent.control import clear_pause, note_text_from_resume, thread_id_from_config
+from src.agent.nodes.output_security_gate import sanitize_executor_output
+from src.agent.nodes.result_collector import branch_result
 from src.agent.state import PlanExecuteState
 
 
@@ -31,6 +31,10 @@ def human_input_node(state: PlanExecuteState, config=None) -> dict:
     )
 
     answer_text = note_text_from_resume(answer) or (str(answer) if answer is not None else "")
+    if state.get("human_request_kind") == "context_pause":
+        thread_id = thread_id_from_config(config)
+        if thread_id:
+            clear_pause(thread_id)
 
     try:
         from src.utils.agent_logger import log_event
@@ -39,26 +43,16 @@ def human_input_node(state: PlanExecuteState, config=None) -> dict:
     except Exception:
         pass
 
-    history, memory, context = record_human_input(
-        state.get("execution_history"), state.get("execution_memory"), state.get("context_memory"),
-        value=answer_text or "(no answer provided)",
-        description=next_step.get("question") or "User response to agent question",
-        task=next_step.get("task") or state.get("current_task") or "",
-    )
-    return {
-        "messages": [
-            HumanMessage(
-                content=answer_text or "(no answer provided)",
-                additional_kwargs={
-                    "ui_hidden": True,
-                    "ui_step": {
-                        "type": "reasoning",
-                        "content": f"User response: {answer_text or '(no answer provided)'}",
-                    },
-                },
-            )
-        ],
-        "execution_history": history,
-        "execution_memory": memory,
-        "context_memory": context,
-    }
+    envelope = sanitize_executor_output({
+            "version": 1, "action_id": next_step.get("action_id"), "source": "human_input",
+            "results": [{
+                "kind": "human_input", "value": (answer_text if state.get("human_request_kind") == "context_pause"
+                                                    else answer_text or "(no answer provided)"),
+                "success": True, "task": next_step.get("task") or state.get("current_task") or "",
+                "description": next_step.get("question") or "User response to agent question",
+                "metadata": {"question": next_step.get("question") or "",
+                             "input_kind": state.get("human_request_kind") or "question",
+                             "resume_context": ("context_selector" if state.get("pending_context_selection") else "")},
+            }],
+        })
+    return branch_result(state, envelope)

@@ -140,7 +140,7 @@ class TestPromptWiring(unittest.TestCase):
 
     def test_spawn_children_routes_to_child_agent(self):
         from src.agent.nodes.agentnode import _parse_response
-        from src.agent.edges.routing import CHILD_AGENT_NODE, route_from_agent
+        from src.agent.nodes.input_security_gate import input_security_gate_node
 
         buffer = (
             "<planner_exit>False</planner_exit>"
@@ -151,7 +151,8 @@ class TestPromptWiring(unittest.TestCase):
         )
         update = _parse_response(buffer, turn_start=False)
         self.assertEqual(update["next_step"]["action"], "child_agent")
-        self.assertEqual(route_from_agent(update), CHILD_AGENT_NODE)
+        gated = input_security_gate_node(update)
+        self.assertEqual(gated["planned_phases"][0]["steps"][0]["command"]["action"], "child_agent")
         self.assertEqual([call["task"] for call in update["next_step"]["child_calls"]],
                          ["Fetch Tokyo weather", "Fetch Manhattan weather"])
 
@@ -281,17 +282,17 @@ class TestAgentRuntimeFanout(unittest.TestCase):
 
 class TestRouting(unittest.TestCase):
     def test_route_subagent_through_armory(self):
-        from src.agent.edges.routing import ARMORY_NODE, route_from_agent
+        from src.agent.nodes.input_security_gate import input_security_gate_node
 
-        dest = route_from_agent({"next_step": {"action": "armory", "resource_type": "subagent",
-                                                "resource_name": "helper"}})
-        self.assertEqual(dest, ARMORY_NODE)
+        out = input_security_gate_node({"next_step": {"action": "armory", "resource_type": "subagent",
+                                                       "resource_name": "helper", "task": "help"}})
+        self.assertEqual(out["planned_phases"][0]["steps"][0]["command"]["action"], "armory")
 
     def test_route_child_agent(self):
-        from src.agent.edges.routing import CHILD_AGENT_NODE, route_from_agent
+        from src.agent.nodes.input_security_gate import input_security_gate_node
 
-        dest = route_from_agent({"next_step": {"action": "child_agent", "child_calls": [{"task": "a"}]}})
-        self.assertEqual(dest, CHILD_AGENT_NODE)
+        out = input_security_gate_node({"next_step": {"action": "child_agent", "child_calls": [{"task": "a"}]}})
+        self.assertEqual(out["planned_phases"][0]["steps"][0]["command"]["action"], "child_agent")
 
 
 class TestProtocolConstants(unittest.TestCase):

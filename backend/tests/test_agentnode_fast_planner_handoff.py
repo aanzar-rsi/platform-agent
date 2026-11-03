@@ -1,4 +1,5 @@
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage
 
@@ -58,3 +59,35 @@ def test_planner_error_forces_planner_prompt(mock_stream, planner_prompt, _mcp, 
 
     assert out["planner_response_type"] == "planner"
     assert planner_prompt.call_args.kwargs["planner_error"] == state["planner_error"]
+
+
+@patch.object(agentnode.Armory, "list", return_value=[SimpleNamespace(type="tool", name="mcp_weather")])
+@patch.object(agentnode, "_safe_learned_experiences", return_value="")
+@patch.object(agentnode, "fast_agent_prompt_loader", return_value=("fast-sys", "fast-user"))
+@patch.object(agentnode, "call_llm_stream", return_value=iter(["<action>finish</action>"]))
+def test_mcp_resource_alias_does_not_mutate_set_during_iteration(_stream, _prompt, learned, _resources):
+    agentnode.agent_node(_state("weather"), _config())
+
+    assert learned.call_args.kwargs["available_resources"] == {
+        ("tool", "mcp_weather"),
+        ("mcp_server", "mcp_weather"),
+    }
+
+
+@patch.object(agentnode.Armory, "list", return_value=[])
+@patch.object(agentnode, "_safe_learned_experiences", return_value="")
+@patch.object(agentnode, "planner_agent_prompt_loader", return_value=("planner-sys", "planner-user"))
+@patch.object(agentnode, "call_llm_stream", return_value=iter(["<action>continue</action>"]))
+def test_child_mode_stops_after_context_select_budget(_stream, _prompt, _learned, _resources):
+    state = {
+        **_state("child query"),
+        "execution_history": [
+            {"type": "context_select", "status": "completed", "success": True}
+            for _ in range(18)
+        ],
+    }
+    cfg = _config()
+    cfg["configurable"]["child_agent_id"] = "child-1"
+    out = agentnode.agent_node(state, cfg)
+    assert out["next_step"]["action"] == "finish"
+    assert "execution safety budget" in out["next_step"]["answer"]
