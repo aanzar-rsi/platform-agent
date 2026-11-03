@@ -1,5 +1,23 @@
 # High-Level Changelog
 
+- 2026-11-03T08:55:39+00:00 — Required OpenSpec task plans for API or WebSocket changes to keep the public `/api-docs` reference accurate and verified.
+
+- 2026-11-03T08:15:24+00:00 — Added OpenSpec task guidance for small, detailed, independently verifiable work items without a fixed time limit.
+
+- 2026-11-03T08:12:46+00:00 — Required OpenSpec proposals and designs for agent or tool-call changes to consider security risks and appropriate guardrails from the start.
+
+- 2026-11-03T08:09:29+00:00 — Required OpenSpec plans to include a Confluence-compatible implementation document for each change.
+
+- 2026-11-03T08:07:04+00:00 — Updated OpenSpec planning guidance to account for multi-tenant deployments at client locations and Jira-prefixed change branches.
+
+- 2026-11-03T08:04:01+00:00 — Expanded OpenSpec planning guidance for concise, impact-aware proposals and designs, disciplined implementation verification, and current agent/tool options.
+
+- 2026-11-03T07:43:44+00:00 — Added concise product context to OpenSpec planning guidance for the multi-user agent platform and its key user flows.
+
+- 2026-11-03T07:34:08+00:00 — Added an OpenSpec proposal rule to ask whether the user wants a new Git branch before creating a proposal.
+
+- 2026-11-03T07:30:16+00:00 — Added an OpenSpec task-planning rule to request a Jira ticket number from the user for each new task.
+
 - 2026-11-03T07:07:37+00:00 — Removed the unrelated architecture diagram from the Docker Compose branch so it no longer appears in the PR against `dev`.
 
 - 2026-11-03T06:57:15+00:00 — Renamed the README onboarding headings to clearly distinguish setup with Docker from setup without Docker.
