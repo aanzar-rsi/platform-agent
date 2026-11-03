@@ -1,0 +1,57 @@
+schema: spec-driven
+
+# Project context (optional)
+# Add only constraints that should guide OpenSpec artifacts and workflows.
+# Include constraints an agent cannot infer by reading the code.
+# Keep general project documentation and discoverable codebase facts out.
+context: |
+  This project is a multi-user, multi-tenant agent platform with web and CLI experiences over a shared agent runtime. Users manage agents and have authenticated conversations that can stream tool and subagent execution and retain conversation history. The platform must be deployable at different client locations.
+  Plan changes with the affected user flows in mind. Where relevant, account for authentication and tenant isolation, live streaming behavior, persistence of conversations and execution state, and environment-specific deployment configuration.
+# Example:
+#   context: |
+#     Designs and tasks must cover Windows, macOS, and Linux
+#     Write all artifacts in Spanish
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+rules:
+  proposal:
+    - Whenever creating a new proposal, ask the user for its Jira ticket number before adding the task.
+    - Before creating a new proposal, ask the user whether to create a new Git branch.
+    - If creating a change branch, prefix its name with the Jira ticket number (for example, PROJ-123-short-description).
+    - Always state what is out of scope
+    - Stay concise and aligned with the project goal; compare viable approaches, recommend the best fit, and summarize impacts on affected user flows, tenants, components, and deployment at client locations.
+    - For agent or tool-call changes, identify relevant security risks and guardrails while evaluating solution options, including authorization, tenant boundaries, tool permissions, untrusted inputs and outputs, secret handling, and failure behavior.
+  design:
+    - Explain the chosen approach and significant tradeoffs concisely; analyze impacts on relevant integrations, authentication, tenant isolation, streaming, persisted state, and deployment across client locations.
+    - For agent or tool-call changes, specify security guardrails for authorization, tenant isolation, least-privilege tool access, untrusted inputs and outputs, secret handling, and safe failure behavior; reuse existing agent security gates where applicable.
+  tasks:
+    - Break work into small, detailed tasks with a clear outcome and a way to verify completion; split at meaningful implementation boundaries rather than imposing a time limit.
+    - Before implementation, ensure a new Git branch exists for the change if one was not created during the proposal; prefix its name with the Jira ticket number.
+    - Include a task to create a Confluence-compatible implementation document covering the implemented approach, affected components and interfaces, deployment or configuration steps, and verification results; use headings and tables that transfer cleanly to Confluence.
+    - For every new or changed HTTP API or WebSocket contract, include tasks to update and verify the published reference at the intended public /api-docs entry point. Keep Swagger/OpenAPI accurate for HTTP routes and document WebSocket connection parameters, events, payloads, and access requirements; include the documentation entry point in scope if it does not yet exist.
+    - For behavior-changing code, include applicable lint checks, dependency vulnerability audits, static analysis, automated unit tests, and a target of more than 90% coverage for changed code where coverage tooling supports it; record why any check does not apply.
+    - For browser-facing behavior changes, include Playwright end-to-end tests; if Playwright is not configured yet, include its setup in the work.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+operations:
+  apply:
+    guidance:
+      - When changing agents or tool calls, check current available model, API, and tool options before choosing an implementation; do not rely on outdated assumptions.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

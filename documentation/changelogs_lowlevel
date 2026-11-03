@@ -1,5 +1,23 @@
 # Low-Level Changelog
 
+- 2026-11-03T08:55:39+00:00 — Added a `rules.tasks` entry in `openspec/config.yaml` requiring documentation and verification for new or changed HTTP and WebSocket contracts at the intended public `/api-docs` entry point, including OpenAPI/Swagger routes, socket connection and event details, access requirements, and initial entry-point work when absent.
+
+- 2026-11-03T08:15:24+00:00 — Added a `rules.tasks` entry in `openspec/config.yaml` to split work at meaningful implementation boundaries and specify an outcome and completion check for each task instead of a hard time limit.
+
+- 2026-11-03T08:12:46+00:00 — Added `rules.proposal` and `rules.design` guidance in `openspec/config.yaml` for agent/tool-call authorization, tenant isolation, tool permissions, untrusted input/output handling, secrets, safe failure behavior, and reuse of existing security gates.
+
+- 2026-11-03T08:09:29+00:00 — Added a `rules.tasks` instruction in `openspec/config.yaml` to plan a Confluence-compatible implementation document describing approach, affected components and interfaces, deployment/configuration steps, and verification results.
+
+- 2026-11-03T08:07:04+00:00 — Expanded `openspec/config.yaml` context and proposal/design impact rules for tenant isolation and client-site deployability, and required Jira ticket prefixes for new change branches in proposal and task guidance.
+
+- 2026-11-03T08:04:01+00:00 — Updated `openspec/config.yaml` with proposal/design impact-analysis rules, task rules for a change branch and applicable lint, audit, static analysis, unit tests, changed-code coverage above 90%, and Playwright coverage/setup for browser changes; added apply guidance to check current model/API/tool options for agent and tool-call changes.
+
+- 2026-11-03T07:43:44+00:00 — Added a `context` block to `openspec/config.yaml` describing the shared web/CLI agent experience and prompting relevant plans to consider authentication, ownership, streaming, and persistence.
+
+- 2026-11-03T07:34:08+00:00 — Added a `rules.proposal` entry in `openspec/config.yaml` requiring a Git-branch preference question before proposal creation.
+
+- 2026-11-03T07:30:16+00:00 — Added `rules.tasks` to `openspec/config.yaml`, instructing artifact authors to ask for a Jira ticket number before adding any new task.
+
 - 2026-11-03T07:07:37+00:00 — Deleted the tracked `documentation/ArchitectureDiagram.drawio` from this branch; the file remains available in its original commit history.
 
 - 2026-11-03T06:57:15+00:00 — Changed the two top-level headings in `README.md` from `Docker Setup` to `Setup with Docker` and from `Quick Start (local development)` to `To setup without Docker`.
