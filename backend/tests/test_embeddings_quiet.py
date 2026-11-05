@@ -112,6 +112,16 @@ class HfLoadIsQuiet(unittest.TestCase):
             [{"show_progress_bar": False}, {"show_progress_bar": False}],
         )
 
+    def test_external_model_dependencies_are_added_when_configured(self):
+        from unittest.mock import patch
+
+        record = _install_fakes(cached=True)
+        with patch.dict(os.environ, {"EMBED_DEPENDENCY_PATH": "/tmp/model-dependencies"}), \
+             patch.object(sys, "path", sys.path[:]):
+            embeddings._get_hf_model("some/model")
+            self.assertEqual(sys.path[0], "/tmp/model-dependencies")
+        self.assertTrue(record["constructed"])
+
 
 if __name__ == "__main__":
     unittest.main()

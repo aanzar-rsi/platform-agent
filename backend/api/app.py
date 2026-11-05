@@ -4,6 +4,10 @@ import uuid
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.requests import Request
+from fastapi.responses import JSONResponse
+import psycopg
+from psycopg_pool import PoolTimeout
 
 from api.api_routes import (
     agents,
@@ -26,6 +30,8 @@ from src.utils.trace import bind, reset, span
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    app.state.dependencies = {"postgres": False, "chroma": False}
+    app.state.startup_warnings = []
 
     @app.middleware("http")
     async def trace_requests(request, call_next):
@@ -38,6 +44,26 @@ def create_app() -> FastAPI:
                 return response
         finally:
             reset(token)
+
+    @app.exception_handler(PoolTimeout)
+    async def handle_pool_timeout(_request: Request, _exc: PoolTimeout):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "Database unavailable. Check PostgreSQL is running and backend/.env PG* values.",
+                "code": "postgres_unavailable",
+            },
+        )
+
+    @app.exception_handler(psycopg.Error)
+    async def handle_psycopg_error(_request: Request, _exc: psycopg.Error):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "Database error. Verify PostgreSQL availability and credentials.",
+                "code": "postgres_error",
+            },
+        )
 
     origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
     app.add_middleware(

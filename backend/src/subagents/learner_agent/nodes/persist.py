@@ -21,6 +21,7 @@ def persist_node(state: LearnerState) -> dict:
         return {"stored_count": 0}
 
     chunks = state.get("chunks") or []
+    requests = state.get("extraction_requests") or {}
     if not chunks:
         _mark_request(state, request_state="SKIPPED")
         return {"status": "skipped", "stored_count": 0, "error": "nothing to store"}
@@ -40,6 +41,9 @@ def persist_node(state: LearnerState) -> dict:
             if (chunk.get("metadata") or {}).get("uid") != uid:
                 raise PermissionError("memory_identity_denied")
             chunk_type = str(chunk.get("chunk_type") or "workflow")
+            approval = requests.get(chunk_type) if isinstance(requests, dict) else None
+            if isinstance(approval, dict) and approval.get("state") not in {None, "APPROVED"}:
+                continue
             if not memory_action_allowed(policy, action="write", scope="USER", chunk_type=chunk_type):
                 raise PermissionError("memory_scope_denied")
             kb.write(uid, policy, str(chunk["advice"]), search_text=chunk.get("embed_text"),
@@ -73,8 +77,13 @@ def persist_node(state: LearnerState) -> dict:
             log_event("learner.persist", status="learned", stored_count=n)
         except Exception:
             pass
-        _mark_request(state, request_state="COMPLETED")
-        return {"status": "learned", "stored_count": n, "error": ""}
+        pending = isinstance(requests, dict) and any(
+            isinstance(item, dict) and item.get("state") == "APPROVAL_PENDING" for item in requests.values()
+        )
+        if not pending:
+            _mark_request(state, request_state="COMPLETED")
+        return {"status": "pending_confirmation" if pending else "learned", "stored_count": n,
+                "error": "awaiting_extraction_confirmation" if pending else ""}
     except Exception as e:
         logger.warning("persist failed", exc_info=True)
         try:

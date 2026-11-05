@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 6
     auth_session_expire_hours: int = 24 * 7
+    mcp_credentials_key: str = ""
 
     cors_origins: str = "*"
 

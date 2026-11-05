@@ -11,6 +11,9 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -64,6 +67,90 @@ SCHEMA_STATEMENTS: list[str] = [
         revoked_at  TIMESTAMPTZ
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS tenants (
+        tenant_id  CHAR(24) PRIMARY KEY CHECK (tenant_id ~ '^[0-9a-f]{24}$'),
+        name       TEXT NOT NULL UNIQUE,
+        status     TEXT NOT NULL DEFAULT 'active'
+                   CHECK (status IN ('active', 'suspended', 'disabled')),
+        policy     JSONB NOT NULL DEFAULT '{}'
+                   CHECK (jsonb_typeof(policy) = 'object'),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS roles (
+        role_id     CHAR(24) PRIMARY KEY CHECK (role_id ~ '^[0-9a-f]{24}$'),
+        tenant_id   CHAR(24) NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        description TEXT,
+        permission_ids JSONB NOT NULL DEFAULT '[]'
+                       CHECK (jsonb_typeof(permission_ids) = 'array'),
+        status      TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'inactive')),
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (tenant_id, name),
+        UNIQUE (role_id, tenant_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_roles_tenant_status ON roles (tenant_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_roles_permission_ids ON roles USING GIN (permission_ids)",
+    """
+    CREATE TABLE IF NOT EXISTS bapi_catalog (
+        bapi_id      CHAR(24) PRIMARY KEY CHECK (bapi_id ~ '^[0-9a-f]{24}$'),
+        tenant_id    CHAR(24) NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+        provider_key TEXT NOT NULL,
+        bapi_name    TEXT NOT NULL,
+        description  TEXT NOT NULL,
+        effect       TEXT NOT NULL CHECK (effect IN ('read', 'write')),
+        status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (tenant_id, provider_key, bapi_name),
+        UNIQUE (bapi_id, tenant_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_bapi_catalog_tenant_status ON bapi_catalog (tenant_id, status)",
+    """
+    CREATE TABLE IF NOT EXISTS permissions (
+        permission_id   CHAR(24) PRIMARY KEY CHECK (permission_id ~ '^[0-9a-f]{24}$'),
+        tenant_id       CHAR(24) NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+        permission_code TEXT NOT NULL,
+        description     TEXT,
+        bapi_id         CHAR(24) NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active', 'inactive')),
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (tenant_id, permission_code),
+        FOREIGN KEY (bapi_id, tenant_id)
+            REFERENCES bapi_catalog(bapi_id, tenant_id) ON DELETE RESTRICT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_permissions_tenant_status ON permissions (tenant_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_permissions_code ON permissions (permission_code)",
+    "CREATE INDEX IF NOT EXISTS idx_permissions_bapi ON permissions (bapi_id)",
+    """
+    CREATE TABLE IF NOT EXISTS tenant_users (
+        user_id    UUID PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        tenant_id  CHAR(24) NOT NULL,
+        role_id    CHAR(24) NOT NULL,
+        email_id   TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        location   TEXT,
+        status     TEXT NOT NULL DEFAULT 'active'
+                   CHECK (status IN ('active', 'inactive')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        FOREIGN KEY (role_id, tenant_id)
+            REFERENCES roles(role_id, tenant_id) ON DELETE RESTRICT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tenant_users_tenant ON tenant_users (tenant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tenant_users_role ON tenant_users (role_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_users_email ON tenant_users (tenant_id, lower(email_id))",
     """
     CREATE TABLE IF NOT EXISTS agent_cores (
         agent_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -125,6 +212,37 @@ SCHEMA_STATEMENTS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_agent_execution_events_stream ON agent_execution_events (execution_id, sequence_number)",
     "CREATE INDEX IF NOT EXISTS idx_agent_execution_events_created ON agent_execution_events (created_at)",
     """
+    CREATE TABLE IF NOT EXISTS preflight_audit (
+        audit_id          CHAR(24) PRIMARY KEY CHECK (audit_id ~ '^[0-9a-f]{24}$'),
+        request_id        TEXT NOT NULL,
+        trace_id          TEXT,
+        user_id           UUID,
+        tenant_id         CHAR(24),
+        role_id           CHAR(24),
+        agent_id          UUID,
+        execution_id      UUID,
+        query_hash        CHAR(64) NOT NULL CHECK (query_hash ~ '^[0-9a-f]{64}$'),
+        resolved_intent   TEXT,
+        domain            TEXT,
+        permissions       JSONB NOT NULL DEFAULT '[]'
+                          CHECK (jsonb_typeof(permissions) = 'array'),
+        decision          TEXT NOT NULL
+                          CHECK (decision IN ('allow', 'degrade', 'clarify', 'deny', 'retry')),
+        reason_code       TEXT NOT NULL,
+        memory_references JSONB NOT NULL DEFAULT '[]'
+                          CHECK (jsonb_typeof(memory_references) = 'array'),
+        candidate_tools   JSONB NOT NULL DEFAULT '[]'
+                          CHECK (jsonb_typeof(candidate_tools) = 'array'),
+        details           JSONB NOT NULL DEFAULT '{}'
+                          CHECK (jsonb_typeof(details) = 'object'),
+        retry_count       INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_preflight_audit_request ON preflight_audit (request_id)",
+    "CREATE INDEX IF NOT EXISTS idx_preflight_audit_user ON preflight_audit (user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_preflight_audit_decision ON preflight_audit (decision, created_at DESC)",
+    """
     CREATE TABLE IF NOT EXISTS agent_messages (
         message_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         agent_id UUID NOT NULL REFERENCES agent_cores(agent_id) ON DELETE CASCADE,
@@ -165,6 +283,7 @@ SCHEMA_STATEMENTS: list[str] = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_mcp_catalog_owner ON mcp_servers_catalog (owner_user_id)",
+    "ALTER TABLE mcp_servers_catalog ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'",
     """
     CREATE TABLE IF NOT EXISTS user_mcp_connections (
         connection_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -372,9 +491,139 @@ def ensure_schema() -> None:
     """Create the agent schema and migrate existing conversations in place."""
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         _migrate_identity(conn)
+        _migrate_permissions(conn)
         for statement in SCHEMA_STATEMENTS:
             conn.execute(statement)
     print("Application tables and indexes verified/created")
+
+
+def _migrate_permissions(conn) -> None:
+    role_permission_ids = conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'roles' AND column_name = 'permission_ids'
+        )
+        """
+    ).fetchone()[0]
+    legacy_role_id = conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'permissions' AND column_name = 'role_id'
+        )
+        """
+    ).fetchone()[0]
+    if not legacy_role_id:
+        return
+    if role_permission_ids:
+        raise RuntimeError("Unsupported partial permission schema")
+    with conn.transaction():
+        conn.execute("LOCK TABLE roles, permissions IN ACCESS EXCLUSIVE MODE")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bapi_catalog (
+                bapi_id CHAR(24) PRIMARY KEY CHECK (bapi_id ~ '^[0-9a-f]{24}$'),
+                tenant_id CHAR(24) NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+                provider_key TEXT NOT NULL,
+                bapi_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                effect TEXT NOT NULL CHECK (effect IN ('read', 'write')),
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (tenant_id, provider_key, bapi_name),
+                UNIQUE (bapi_id, tenant_id)
+            )
+            """
+        )
+        rows = conn.execute(
+            """
+            SELECT r.tenant_id, p.role_id, p.permission_code, p.description, p.status,
+                   p.created_at, p.updated_at
+            FROM permissions p
+            JOIN roles r ON r.role_id = p.role_id
+            ORDER BY r.tenant_id, p.permission_code, p.role_id
+            """
+        ).fetchall()
+        descriptions: dict[tuple[str, str], set[str]] = {}
+        for tenant_id, _role_id, code, description, _status, _created_at, _updated_at in rows:
+            key = (str(tenant_id), str(code).strip())
+            value = str(description or "").strip()
+            descriptions.setdefault(key, set())
+            if value:
+                descriptions[key].add(value)
+        if any(len(values) > 1 for values in descriptions.values()):
+            raise RuntimeError("Conflicting legacy permission descriptions")
+        conn.execute("ALTER TABLE permissions RENAME TO permissions_legacy")
+        conn.execute("ALTER TABLE permissions_legacy RENAME CONSTRAINT permissions_pkey TO permissions_legacy_archive_pkey")
+        conn.execute("ALTER TABLE permissions_legacy RENAME CONSTRAINT permissions_role_id_permission_code_key TO permissions_legacy_role_code_key")
+        conn.execute("DROP INDEX IF EXISTS idx_permissions_role_status")
+        conn.execute("DROP INDEX IF EXISTS idx_permissions_code")
+        conn.execute(
+            """
+            CREATE TABLE permissions (
+                permission_id CHAR(24) PRIMARY KEY CHECK (permission_id ~ '^[0-9a-f]{24}$'),
+                tenant_id CHAR(24) NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+                permission_code TEXT NOT NULL,
+                description TEXT,
+                bapi_id CHAR(24) NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (tenant_id, permission_code),
+                FOREIGN KEY (bapi_id, tenant_id)
+                    REFERENCES bapi_catalog(bapi_id, tenant_id) ON DELETE RESTRICT
+            )
+            """
+        )
+        conn.execute(
+            "ALTER TABLE roles ADD COLUMN permission_ids JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(permission_ids) = 'array')"
+        )
+        conn.execute("ALTER TABLE permissions_legacy DROP CONSTRAINT IF EXISTS permissions_role_id_fkey")
+        permission_ids: dict[tuple[str, str], str] = {}
+        role_permissions: dict[str, list[str]] = {}
+        for tenant_id, role_id, code, description, status, created_at, updated_at in rows:
+            tenant = str(tenant_id)
+            permission_code = str(code).strip()
+            permission_key = (tenant, permission_code)
+            permission_id = permission_ids.setdefault(
+                permission_key,
+                hashlib.sha256(f"permission:{tenant}:{permission_code}".encode()).hexdigest()[:24],
+            )
+            match = re.search(r"BAPI_[A-Z0-9_]+", str(description or ""))
+            bapi_name = match.group(0) if match else permission_code.upper().replace(".", "_")
+            bapi_id = hashlib.sha256(f"bapi:toy-erp:{bapi_name}".encode()).hexdigest()[:24]
+            effect = "read" if permission_code.rsplit(".", 1)[-1] in {"read", "detail", "list", "get"} else "write"
+            conn.execute(
+                """
+                INSERT INTO bapi_catalog
+                    (bapi_id, tenant_id, provider_key, bapi_name, description, effect, status)
+                VALUES (%s, %s, 'toy-erp', %s, %s, %s, 'active')
+                ON CONFLICT (tenant_id, provider_key, bapi_name) DO UPDATE
+                SET description = EXCLUDED.description, effect = EXCLUDED.effect,
+                    status = 'active', updated_at = now()
+                """,
+                (bapi_id, tenant, bapi_name, str(description or bapi_name), effect),
+            )
+            conn.execute(
+                """
+                INSERT INTO permissions
+                    (permission_id, tenant_id, permission_code, description, bapi_id, status, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, 'active', %s, %s)
+                ON CONFLICT (tenant_id, permission_code) DO UPDATE
+                SET description = EXCLUDED.description, bapi_id = EXCLUDED.bapi_id,
+                    status = 'active', updated_at = EXCLUDED.updated_at
+                """,
+                (permission_id, tenant, permission_code, str(description or ""), bapi_id, created_at, updated_at),
+            )
+            if status == "active":
+                role_permissions.setdefault(str(role_id), []).append(permission_id)
+        for role_id, ids in role_permissions.items():
+            conn.execute(
+                "UPDATE roles SET permission_ids = %s::jsonb, updated_at = now() WHERE role_id = %s",
+                (json.dumps(sorted(set(ids))), role_id),
+            )
 
 
 def _migrate_identity(conn) -> None:

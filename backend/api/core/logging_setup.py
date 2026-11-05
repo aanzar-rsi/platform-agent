@@ -6,8 +6,9 @@ import sys
 
 def configure_logging(level: int = logging.INFO) -> None:
     trace_logger = logging.getLogger("agent.trace")
-    trace_logger.handlers = [logging.NullHandler()]
-    trace_logger.propagate = False
+    trace_logger.handlers = [handler for handler in trace_logger.handlers
+                             if not isinstance(handler, logging.NullHandler)]
+    trace_logger.propagate = True
     trace_logger.setLevel(logging.INFO)
 
     root = logging.getLogger()

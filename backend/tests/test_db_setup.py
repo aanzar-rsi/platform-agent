@@ -23,9 +23,15 @@ EXPECTED_TABLES = [
     "user_credentials",
     "user_preferences",
     "auth_sessions",
+    "tenants",
+    "roles",
+    "bapi_catalog",
+    "permissions",
+    "tenant_users",
     "agent_cores",
     "agent_executions",
     "agent_execution_events",
+    "preflight_audit",
     "agent_messages",
     "messages",
     "mcp_servers_catalog",
@@ -78,6 +84,20 @@ class TestSchemaStatementsAreIdempotent(unittest.TestCase):
         combined = "\n".join(SCHEMA_STATEMENTS)
         for retired in ("chat_id", "run_id", "coreid", "log_id", "CREATE TABLE IF NOT EXISTS chats"):
             self.assertNotIn(retired, combined)
+
+    def test_preflight_schema_preserves_object_id_and_user_identity(self):
+        combined = "\n".join(SCHEMA_STATEMENTS)
+        for column in ("tenant_id", "role_id", "bapi_id", "permission_id", "audit_id"):
+            self.assertRegex(combined, rf"{column}\s+CHAR\(24\)")
+        self.assertRegex(
+            combined,
+            r"CREATE TABLE IF NOT EXISTS tenant_users \(\s*user_id\s+UUID PRIMARY KEY",
+        )
+        self.assertNotIn("tenant_user_id", combined)
+
+    def test_preflight_object_ids_are_validated(self):
+        combined = "\n".join(SCHEMA_STATEMENTS)
+        self.assertGreaterEqual(combined.count("^[0-9a-f]{24}$"), 4)
 
     def test_foreign_keys_come_after_their_target_table(self):
         """A REFERENCES users(...) statement must not appear before `users`

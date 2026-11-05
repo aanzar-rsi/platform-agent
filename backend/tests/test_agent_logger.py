@@ -50,6 +50,13 @@ class TestTruncate(unittest.TestCase):
 
 
 class TestSessionLoggerBind(unittest.TestCase):
+    @staticmethod
+    def _log_file_for(tmp_path: Path, agent_id: str) -> Path:
+        matches = list(tmp_path.glob(f"*_{agent_id}.jsonl"))
+        if len(matches) != 1:
+            raise AssertionError(f"expected one log file for {agent_id}, found {len(matches)}")
+        return matches[0]
+
     def test_bind_write_reset(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -74,7 +81,7 @@ class TestSessionLoggerBind(unittest.TestCase):
                 self.assertIsNone(get_session_logger())
 
             self.assertTrue(flush_pending_logs(timeout=5.0), "writer queue did not drain in time")
-            path = tmp_path / "agent_test_1.jsonl"
+            path = self._log_file_for(tmp_path, "agent_test_1")
             self.assertTrue(path.exists())
             lines = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
             events = [row["event"] for row in lines]
@@ -106,7 +113,7 @@ class TestSessionLoggerBind(unittest.TestCase):
                 self.assertIsNone(token)
                 self.assertIsNone(get_session_logger())
                 log_event("noop")
-            self.assertFalse((Path(tmp) / "chat_x.jsonl").exists())
+            self.assertFalse(list(Path(tmp).glob("*_chat_x.jsonl")))
 
     def test_safe_agent_id_sanitizes_filename(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,7 +144,7 @@ class TestSessionLoggerBind(unittest.TestCase):
                 log_event("big", body="Z" * 100)
                 reset_session_logger(token)
             self.assertTrue(flush_pending_logs(timeout=5.0), "writer queue did not drain in time")
-            row = json.loads((tmp_path / "chat_trunc.jsonl").read_text(encoding="utf-8").strip())
+            row = json.loads(self._log_file_for(tmp_path, "chat_trunc").read_text(encoding="utf-8").strip())
             self.assertIn("truncated", row["payload"]["body"])
 
 

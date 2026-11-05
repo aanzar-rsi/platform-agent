@@ -32,6 +32,7 @@ frontend/.env
 
 # --- Runtime artifacts ---
 backend/logs/
+logs/
 backend/data/
 
 # --- Tooling outputs ---
@@ -46,7 +47,12 @@ Thumbs.db
 .idea/
 .vscode/
 
-logs/
 tests/
+!backend/tests/
+!backend/tests/**
+backend/tests/__pycache__/
 requirements/
-graphify-out/
+text_render.py
+scripts/inputs.txt
+scripts/output.txt
+scripts/output1.txt

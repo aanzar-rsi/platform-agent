@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import sys
 import threading
+import time
 from typing import Sequence
 
 import numpy as np
@@ -23,20 +26,41 @@ def _get_hf_model(model_id: str):
     if _hf_model is None:
         with _hf_model_lock:
             if _hf_model is None:
-                from sentence_transformers import SentenceTransformer
-                from transformers.utils import logging as hf_logging
-
-                # Silence the "Loading weights" tqdm bar on every process start.
-                hf_logging.disable_progress_bar()
+                started_at = time.monotonic()
+                _embedding_timing("model_load", "hf", started_at, start=True)
                 try:
-                    # A cached model needs no Hub round-trip, and skipping it
-                    # also skips the "unauthenticated requests / set a HF_TOKEN"
-                    # warning the Hub returns on anonymous requests.
-                    _hf_model = SentenceTransformer(model_id, local_files_only=True)
+                    _hf_model = _load_hf_model(model_id)
                 except Exception:
-                    logger.info("Embedding model %s not cached; downloading once", model_id)
-                    _hf_model = SentenceTransformer(model_id)
+                    _embedding_timing("model_load", "hf", started_at, error=True)
+                    raise
+                _embedding_timing("model_load", "hf", started_at)
     return _hf_model
+
+
+def _load_hf_model(model_id: str):
+    dependency_path = os.environ.get("EMBED_DEPENDENCY_PATH")
+    if dependency_path and dependency_path not in sys.path:
+        sys.path.insert(0, dependency_path)
+    from sentence_transformers import SentenceTransformer
+    from transformers.utils import logging as hf_logging
+
+    hf_logging.disable_progress_bar()
+    try:
+        return SentenceTransformer(model_id, local_files_only=True)
+    except Exception:
+        logger.info("Embedding model %s not cached; downloading once", model_id)
+        return SentenceTransformer(model_id)
+
+
+def _embedding_timing(stage: str, method: str, started_at: float, *, start: bool = False,
+                      error: bool = False) -> None:
+    from src.utils.trace import emit, in_run
+
+    if in_run():
+        emit("memory.embedding.start" if start else "memory.embedding.error" if error else "memory.embedding.end",
+             component="embeddings", status="error" if error else "ok",
+             duration_ms=None if start else (time.monotonic() - started_at) * 1000,
+             data={"stage": stage, "embedding_method": method})
 
 
 def _embed_numpy(text: str, dimensions: int) -> list[float]:
@@ -61,9 +85,19 @@ def embed_text(
     method = method or settings.embed_method
     if method == "hf":
         model = _get_hf_model(model_id or settings.embed_model_id)
-        return model.encode(text or "", show_progress_bar=False).tolist()
+        started_at = time.monotonic()
+        _embedding_timing("encode", method, started_at, start=True)
+        try:
+            vector = model.encode(text or "", show_progress_bar=False).tolist()
+        except Exception:
+            _embedding_timing("encode", method, started_at, error=True)
+            raise
+        _embedding_timing("encode", method, started_at)
+        return vector
     if method == "numpy":
-        return _embed_numpy(text, dimensions or settings.embed_dimensions)
+        vector = _embed_numpy(text, dimensions or settings.embed_dimensions)
+        _embedding_timing("encode", method, started_at)
+        return vector
     raise ValueError(f"Unknown embed method: '{method}'. Supported: 'hf', 'numpy'")
 
 

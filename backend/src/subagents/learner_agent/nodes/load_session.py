@@ -12,6 +12,7 @@ from api.db.repositories.agents import AgentRepository
 from api.db.repositories.preferences import PreferencesRepository
 from src.agent.agent_core import AgentCore
 from src.agent.policy_schema import effective_memory_policy, memory_requires_extract_confirmation
+from src.agent.nodes.output_security_gate import sanitize_value
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +54,19 @@ def _slim_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "type": entry.get("type"),
                 "tool_name": entry.get("tool_name") or entry.get("agent_name"),
-                "tool_args": entry.get("tool_args") or {},
+                "tool_args": sanitize_value(entry.get("tool_args") or entry.get("arguments") or {}),
                 "task": entry.get("task") or "",
                 "key": entry.get("key"),
-                "result": result_preview,
+                "result": sanitize_value(result_preview),
             }
         )
     return slim
+
+
+def _conversation_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    """Send only sanitized conversation evidence to the learner."""
+    return [{"role": getattr(message, "type", "unknown"),
+             "content": sanitize_value(getattr(message, "content", ""))} for message in messages]
 
 
 def load_session_node(state: LearnerState) -> dict:

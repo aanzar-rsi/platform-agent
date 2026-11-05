@@ -18,11 +18,14 @@ export interface WsEnvelope {
 export type ServerEventType =
   | 'session.ready'
   | 'run.started'
+  | 'preflight.status'
   | 'node.started'
   | 'node.finished'
   | 'llm.token'
   | 'llm.cache_hit'
+  | 'llm.started'
   | 'llm.done'
+  | 'llm.error'
   | 'tool.started'
   | 'tool.finished'
   | 'subagent.started'
@@ -55,6 +58,10 @@ export interface AgentWebSocketHandlers {
     epoch: number;
   }) => void;
   onRunStarted?: (payload: { execution_id: string; query: string; checkpoint_id?: string; resumed?: boolean }) => void;
+  onPreflightStatus?: (payload: {
+    stage: 'checking' | 'access' | 'actions' | 'context' | 'done';
+    decision?: 'allow' | 'degrade' | 'clarify' | 'retry' | 'deny';
+  }) => void;
   onNodeStarted?: (payload: { node: string }) => void;
   onNodeFinished?: (payload: { node: string; next_step?: Record<string, unknown> }) => void;
   onLlmToken?: (payload: {
@@ -70,21 +77,25 @@ export interface AgentWebSocketHandlers {
     source_call_id?: string;
     cache_key?: string;
   }) => void;
-  onLlmDone?: (payload: { channel?: string }) => void;
-  onToolStarted?: (payload: { tool_name: string; tool_args?: unknown; task?: string }) => void;
+  onLlmStarted?: (payload: LlmLifecyclePayload) => void;
+  onLlmDone?: (payload: LlmLifecyclePayload) => void;
+  onLlmError?: (payload: LlmLifecyclePayload & { message?: string }) => void;
+  onToolStarted?: (payload: { action_id?: string; tool_name: string; tool_args?: unknown; task?: string }) => void;
   onToolFinished?: (payload: {
+    action_id?: string;
     tool_name: string;
     tool_args?: unknown;
     task?: string;
     result?: string;
     success?: boolean;
   }) => void;
-  onSubagentStarted?: (payload: { agent_name: string; tool_args?: unknown; task?: string }) => void;
+  onSubagentStarted?: (payload: { action_id?: string; agent_name: string; tool_args?: unknown; task?: string }) => void;
   onSubagentStep?: (payload: {
     agent_name: string;
-    event: { step: string; message: string; status: string; ts?: string; kind?: string; detail?: unknown };
+    event: { step: string; message: string; status: string; ts?: string; kind?: string; detail?: unknown; action_id?: string };
   }) => void;
   onSubagentFinished?: (payload: {
+    action_id?: string;
     agent_name: string;
     task?: string;
     result?: string;
@@ -131,6 +142,17 @@ export interface AgentWebSocketHandlers {
   onOpen?: () => void;
   onClose?: (ev: CloseEvent) => void;
   onReconnect?: (attempt: number) => void;
+}
+
+export interface LlmLifecyclePayload {
+  call_id: string;
+  mode?: string;
+  model_id?: string;
+  output_type?: string | null;
+  agent_id?: string;
+  child_agent_id?: string;
+  cached?: boolean;
+  latency_ms?: number;
 }
 
 export class AgentWebSocketClient {
@@ -353,6 +375,9 @@ export class AgentWebSocketClient {
         }
         this.handlers.onRunStarted?.(payload as any);
         break;
+      case 'preflight.status':
+        this.handlers.onPreflightStatus?.(payload as any);
+        break;
       case 'node.started':
         this.handlers.onNodeStarted?.(payload as any);
         break;
@@ -365,8 +390,14 @@ export class AgentWebSocketClient {
       case 'llm.cache_hit':
         this.handlers.onLlmCacheHit?.(payload as any);
         break;
+      case 'llm.started':
+        this.handlers.onLlmStarted?.(payload as any);
+        break;
       case 'llm.done':
         this.handlers.onLlmDone?.(payload as any);
+        break;
+      case 'llm.error':
+        this.handlers.onLlmError?.(payload as any);
         break;
       case 'tool.started':
         this.handlers.onToolStarted?.(payload as any);

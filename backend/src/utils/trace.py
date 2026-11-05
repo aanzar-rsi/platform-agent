@@ -22,6 +22,7 @@ _context: ContextVar[dict[str, Any]] = ContextVar("agent_trace_context", default
 _CLIENT_ROOT = Path(__file__).resolve().parents[2]
 _TRACE_DIR = Path(os.environ.get("EVA_TRACE_LOG_DIR") or (_CLIENT_ROOT / "logs" / "traces"))
 _TRACE_LOCK = threading.Lock()
+_TRACE_FILES: dict[str, Path] = {}
 _TRACE_STDOUT = {"1", "true", "yes", "on"}
 _ids = ("request_id", "agent_id", "execution_id", "session_id", "owner_id",
         "owner_type", "tenant_id", "parent_agent_id", "child_agent_id")
@@ -30,8 +31,10 @@ _safe_data = {"method", "path", "http_status", "client_type", "reason", "checkpo
               "scope_counts", "top_k", "returned_count", "policy_version", "old_version", "new_version",
               "changed_keys", "guardrail_type", "decision", "reason_code", "child_agent_id",
               "requested_policy_version", "effective_policy_version", "result_size", "query_hash",
-               "attempt", "task_size", "run_state"}
+               "attempt", "task_size", "run_state", "stage"}
 _safe_data.update({"promotion_request_id", "source_chunk_id", "target_chunk_id", "from_scope", "to_scope"})
+_safe_data.update({"elapsed_ms", "unattributed_ms", "step_count", "stage_totals_ms", "slowest_steps"})
+_safe_data.update({"embedding_method"})
 
 # Only schema-listed names are emitted. Extend requirements/02_TRACE_SCHEMA.md first.
 EVENTS = frozenset({
@@ -51,7 +54,8 @@ EVENTS = frozenset({
     "guardrail.output.check", "guardrail.decision.allow", "guardrail.decision.deny",
     "guardrail.decision.approval_required", "policy.armory.update", "policy.memory.update",
     "checkpoint.create", "checkpoint.list", "checkpoint.resume", "checkpoint.error",
-    "node.execution.error",
+    "node.execution.error", "preflight.stage", "preflight.decision",
+    "run.timing.step", "run.timing.summary", "memory.embedding.start", "memory.embedding.end", "memory.embedding.error",
     "memory.promotion.requested", "memory.promotion.validated", "memory.promotion.approved",
     "memory.promotion.rejected", "memory.promotion.activated", "memory.promotion.failed",
     "memory.promotion.cancelled",
@@ -114,9 +118,17 @@ def _safe_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip()) or "unbound"
 
 
+def _filename_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
 def _trace_path(ids: dict[str, Any]) -> Path:
-    key = str(ids.get("agent_id") or "unbound")
-    return _TRACE_DIR / f"{_safe_id(key)}.json"
+    key = _safe_id(str(ids.get("agent_id") or "unbound"))
+    path = _TRACE_FILES.get(key)
+    if path is None:
+        path = _TRACE_DIR / f"{_filename_timestamp()}_{key}.json"
+        _TRACE_FILES[key] = path
+    return path
 
 
 def _persist(record: dict[str, Any]) -> None:
@@ -160,7 +172,7 @@ def emit(event: str, *, status: str = "ok", data: dict | None = None,
     merged = {key: None for key in _ids}
     merged.update(context.get("ids") or {})
     merged.update({key: str(value) if value is not None else None for key, value in ids.items() if key in _ids})
-    if event.startswith(("run.", "node.", "tool.", "subagent.", "child.", "memory.", "policy.",
+    if event.startswith(("run.", "node.", "preflight.", "tool.", "subagent.", "child.", "memory.", "policy.",
                           "guardrail.", "checkpoint.", "armory.")):
         keys = ("agent_id",) if event.startswith("checkpoint.") and not merged["execution_id"] else (
             "agent_id", "execution_id")
@@ -179,6 +191,16 @@ def emit(event: str, *, status: str = "ok", data: dict | None = None,
     if "path" in safe:
         safe["path"] = re.sub(r"(/agents)/[^/]+", r"\1/:id", str(safe["path"]))
         safe["path"] = re.sub(r"/[0-9a-fA-F-]{32,36}(?=/|$)", "/:id", safe["path"])
+    if event == "run.timing.summary":
+        safe["stage_totals_ms"] = {
+            str(key)[:80]: round(float(value), 2)
+            for key, value in list((safe.get("stage_totals_ms") or {}).items())[:40]
+        }
+        safe["slowest_steps"] = [
+            {key: (str(value)[:80] if key in {"stage", "node"} else round(float(value), 2))
+             for key, value in item.items() if key in {"stage", "node", "duration_ms"}}
+            for item in (safe.get("slowest_steps") or [])[:5] if isinstance(item, dict)
+        ]
     record = {
         "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "event": event, "status": status,
@@ -196,8 +218,30 @@ def emit(event: str, *, status: str = "ok", data: dict | None = None,
                      "redaction_tags": ["data"] if len(safe) != len(given) or redacted_reason else []},
     }
     _persist(record)
+    if event in {"preflight.stage", "preflight.decision"}:
+        logger.info(
+            "%s request_id=%s agent_id=%s execution_id=%s stage=%s decision=%s reason_code=%s returned_count=%s duration_ms=%s",
+            event,
+            merged.get("request_id"),
+            merged.get("agent_id"),
+            merged.get("execution_id"),
+            safe.get("stage"),
+            safe.get("decision"),
+            safe.get("reason_code"),
+            safe.get("returned_count"),
+            round(duration_ms, 2) if duration_ms is not None else None,
+        )
+    elif event in {"run.timing.step", "run.timing.summary"}:
+        logger.info(
+            "%s agent_id=%s execution_id=%s stage=%s node=%s duration_ms=%s data=%s",
+            event, merged.get("agent_id"), merged.get("execution_id"),
+            safe.get("stage"), safe.get("node"),
+            round(duration_ms, 2) if duration_ms is not None else None,
+            safe if event == "run.timing.summary" else {"reason_code": safe.get("reason_code")},
+        )
     if os.environ.get("EVA_TRACE_LOGGER_ENABLED", "").strip().lower() in _TRACE_STDOUT:
-        logger.info(json.dumps(record, default=str))
+        if event not in {"preflight.stage", "preflight.decision"}:
+            logger.info(json.dumps(record, default=str))
     return record
 
 

@@ -37,12 +37,12 @@ export default function InterruptPrompt({ interrupt, onSubmit, busy, embedded }:
   const kind = interrupt.kind || payload.kind || "paused";
 
   const submitApprove = useCallback(
-    () => onSubmit({ approved: true, note: note.trim() || undefined }),
-    [note, onSubmit]
+    () => onSubmit({ approved: true, confirmation_id: payload.confirmation_id, note: note.trim() || undefined }),
+    [note, onSubmit, payload.confirmation_id]
   );
   const submitDecline = useCallback(
-    () => onSubmit({ approved: false, reason: declineReason.trim() || "User declined" }),
-    [declineReason, onSubmit]
+    () => onSubmit({ approved: false, confirmation_id: payload.confirmation_id, reason: declineReason.trim() || "User declined" }),
+    [declineReason, onSubmit, payload.confirmation_id]
   );
   const submitText = useCallback(() => onSubmit(note.trim()), [note, onSubmit]);
   const submitResume = useCallback(

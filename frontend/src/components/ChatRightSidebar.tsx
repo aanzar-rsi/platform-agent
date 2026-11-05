@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Bot,
   Brain,
   ChevronDown,
   ChevronRight,
+  Database,
+  Expand,
   Plus,
+  Search,
+  Server,
+  ShieldCheck,
   Sparkles,
+  Wrench,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
 import { useAuth } from "@/hooks/use-auth";
@@ -15,12 +24,15 @@ import {
   mcpAPI,
   type AgentPolicyResponse,
   type AnalyticsSummary,
+  type CatalogTool,
   type CatalogSubagent,
   type MCPServer,
+  type MCPServerDetails,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -36,6 +48,7 @@ interface ChatRightSidebarProps {
   activeTab: RightSidebarTab;
   onTabChange: (tab: RightSidebarTab) => void;
   onClose?: () => void;
+  isExecuting?: boolean;
   onTuneSettingsChange?: (settings: {
     maxTokens: string;
     responseFormat: string;
@@ -64,11 +77,31 @@ function formatStateLabel(state: string | undefined): string {
   return state.replace(/_/g, " ");
 }
 
+function FormattedText({ children }: { children: string }) {
+  return (
+    <div className="prose prose-sm max-w-none break-words text-[11px] leading-5 text-gray-700 prose-headings:mb-1 prose-headings:mt-2 prose-headings:text-xs prose-p:my-1 prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:whitespace-pre-wrap prose-pre:rounded-md prose-pre:bg-gray-950 prose-pre:p-2 prose-pre:text-[10px] prose-code:break-all prose-li:my-0">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+    </div>
+  );
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function analyticsModelLabel(model: string, cost: number) {
+  return UUID_PATTERN.test(model) && cost === 0 ? "Cache" : model;
+}
+
+type ArmoryDetail =
+  | { kind: "tool"; item: CatalogTool }
+  | { kind: "subagent"; item: CatalogSubagent }
+  | { kind: "server"; item: MCPServer };
+
 export default function ChatRightSidebar({
   agentId,
   activeTab,
   onTabChange,
   onClose,
+  isExecuting = false,
   onTuneSettingsChange,
 }: ChatRightSidebarProps) {
   const { user, isAuthenticated } = useAuth();
@@ -81,15 +114,17 @@ export default function ChatRightSidebar({
   const [policyData, setPolicyData] = useState<AgentPolicyResponse | null>(null);
   const [policySaving, setPolicySaving] = useState(false);
 
-  const [tools, setTools] = useState<Array<{ name: string; description?: string }>>([]);
+  const [tools, setTools] = useState<CatalogTool[]>([]);
   const [enabledTools, setEnabledTools] = useState<string[] | undefined>(undefined);
   const [toolSearch, setToolSearch] = useState("");
 
   const [servers, setServers] = useState<MCPServer[]>([]);
+  const [serverDetails, setServerDetails] = useState<Record<string, MCPServerDetails>>({});
   const [subagents, setSubagents] = useState<CatalogSubagent[]>([]);
 
   const [memoryEntries, setMemoryEntries] = useState<Array<{ key: string; value: string; category?: string }>>([]);
   const [memoryChunks, setMemoryChunks] = useState<Array<Record<string, unknown>>>([]);
+  const [memorySearch, setMemorySearch] = useState("");
   const [showMemoryPolicyEditor, setShowMemoryPolicyEditor] = useState(false);
   const [showArmoryPolicyEditor, setShowArmoryPolicyEditor] = useState(false);
   const [policyChangeMode, setPolicyChangeMode] = useState<PolicyChangeMode>("form");
@@ -103,6 +138,7 @@ export default function ChatRightSidebar({
 
   const [updatingServerId, setUpdatingServerId] = useState<string | null>(null);
   const [connectingServerId, setConnectingServerId] = useState<string | null>(null);
+  const [armoryDetail, setArmoryDetail] = useState<ArmoryDetail | null>(null);
 
   const canLoad = Boolean(user && isAuthenticated);
 
@@ -146,14 +182,28 @@ export default function ChatRightSidebar({
       agentsAPI.getArmorySubagents(agentId).catch(() => ({ subagents: [] })),
     ]);
     setTools([...(catalog.internal || []), ...(catalog.mcp || [])]);
-    setServers((rawServers || []).map((server) => ({
+    const normalizedServers = (rawServers || []).map((server) => ({
       ...server,
       id: String(server.id),
       name: String(server.name || ""),
       enabled: server.enabled !== false,
       connected: Boolean(server.connected),
       is_connected: Boolean(server.connected),
-    } as MCPServer)));
+    } as MCPServer));
+    setServers(normalizedServers);
+    const details = await Promise.all(
+      normalizedServers
+        .filter((server) => server.is_connected)
+        .map(async (server) => {
+          try {
+            const result = await mcpAPI.getServerDetails(server.id);
+            return [server.id, result.details] as const;
+          } catch {
+            return null;
+          }
+        })
+    );
+    setServerDetails(Object.fromEntries(details.filter((detail): detail is readonly [string, MCPServerDetails] => detail !== null)));
     setSubagents(subagentCatalog.subagents || []);
   }, [agentId]);
 
@@ -176,6 +226,17 @@ export default function ChatRightSidebar({
   }, [canLoad, refreshArmory, refreshMemory, refreshPolicy, refreshUsage]);
 
   useEffect(() => {
+    if (!canLoad || !isExecuting) return;
+    const update = () => void refreshUsage().catch(() => undefined);
+    update();
+    const timer = window.setInterval(update, 2000);
+    return () => {
+      window.clearInterval(timer);
+      update();
+    };
+  }, [canLoad, isExecuting, refreshUsage]);
+
+  useEffect(() => {
     onTuneSettingsChange?.({
       maxTokens: "",
       responseFormat: "text",
@@ -191,6 +252,14 @@ export default function ChatRightSidebar({
   );
 
   const allToolNames = useMemo(() => tools.map((t) => t.name), [tools]);
+
+  const filteredMemoryEntries = useMemo(() => {
+    const query = memorySearch.trim().toLowerCase();
+    if (!query) return memoryEntries;
+    return memoryEntries.filter((entry) =>
+      [entry.key, entry.value, entry.category].some((value) => value?.toLowerCase().includes(query))
+    );
+  }, [memoryEntries, memorySearch]);
 
   const toggleTool = (name: string) => {
     setEnabledTools((prev) => {
@@ -325,6 +394,15 @@ export default function ChatRightSidebar({
   const enabledPolicyResources = Object.values(policyData?.policy.armory.resources || {})
     .flat()
     .filter((resource) => resource.enabled).length;
+  const policyResourceGroups = Object.entries(policyData?.policy.armory.resources || {})
+    .filter(([, resources]) => resources.length > 0)
+    .sort(([left], [right]) => left.localeCompare(right));
+
+  const detailTitle = armoryDetail?.kind === "server"
+    ? armoryDetail.item.name
+    : armoryDetail?.kind === "subagent"
+      ? armoryDetail.item.display_name || armoryDetail.item.name
+      : armoryDetail?.item.name;
 
   const memoryStateTone = (state: string) => {
     const normalized = state.toLowerCase();
@@ -383,97 +461,142 @@ export default function ChatRightSidebar({
           </TabsList>
         </div>
 
-        <TabsContent value="usage" className="mt-0 flex-1 overflow-hidden p-3">
+        <TabsContent value="usage" className="mt-0 min-w-0 flex-1 overflow-hidden p-3">
           {loading && !usage ? (
             <div className="text-xs text-gray-600">Loading usage...</div>
           ) : (
-            <ScrollArea className="h-full pr-1">
-              <div className="space-y-3">
+            <ScrollArea className="h-full min-w-0">
+              <div className="min-w-0 space-y-4 pb-6 pr-3">
                 <div
-                  className="rounded-xl border px-3 py-2.5 shadow-md"
+                  className="min-w-0 rounded-xl border p-4 shadow-sm"
                   style={{ borderColor: "#facc15", background: "linear-gradient(135deg, #fffef0 0%, #f5f5f4 100%)" }}
                 >
-                  <p className="text-[10px] uppercase tracking-wide text-gray-500">scope.type</p>
-                  <p className="text-sm font-semibold text-gray-900 capitalize">{analyticsDetail?.scope.type ?? "agent"}</p>
-                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                    <div className="rounded-md border px-2 py-1.5" style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff" }}>
-                      <p className="text-gray-500 text-[10px] uppercase">llm.cost_usd.total</p>
-                      <p className="text-gray-900 font-semibold">${(usage?.totalCostUsd ?? 0).toFixed(4)}</p>
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-500">Usage overview</p>
+                  <h3 className="mt-1 text-base font-bold capitalize text-gray-950">
+                    {analyticsDetail?.scope.type ?? "agent"} scope
+                  </h3>
+                  <p className="mt-1 text-xs leading-relaxed text-gray-600">
+                    Activity, cost, and reliability for the current analytics window.
+                  </p>
+                  <div className="mt-3 grid min-w-0 grid-cols-2 gap-2 text-xs">
+                    <div className="min-w-0 rounded-lg border p-2.5" style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff" }}>
+                      <p className="break-words text-[10px] font-medium text-gray-500">Total LLM cost</p>
+                      <p className="mt-0.5 break-words text-base font-bold text-gray-900">${(usage?.totalCostUsd ?? 0).toFixed(4)}</p>
                     </div>
-                    <div className="rounded-md border px-2 py-1.5" style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff" }}>
-                      <p className="text-gray-500 text-[10px] uppercase">agent.runtime.failed_rate</p>
-                      <p className="text-gray-900 font-semibold">{errorRate.toFixed(1)}%</p>
+                    <div className="min-w-0 rounded-lg border p-2.5" style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff" }}>
+                      <p className="break-words text-[10px] font-medium text-gray-500">Failed run rate</p>
+                      <p className="mt-0.5 break-words text-base font-bold text-gray-900">{errorRate.toFixed(1)}%</p>
                     </div>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
-                  {[
-                    { label: "llm.tokens.total", value: usageTokens.toLocaleString() },
-                    { label: "llm.tokens.input", value: (usage?.inputTokens ?? 0).toLocaleString() },
-                    { label: "llm.tokens.output", value: (usage?.outputTokens ?? 0).toLocaleString() },
-                    { label: "llm.tokens.cached_input", value: (usage?.cachedTokens ?? 0).toLocaleString() },
-                    { label: "llm.tokens.reasoning", value: (usage?.reasoningTokens ?? 0).toLocaleString() },
-                    { label: "agent.messages.total", value: usageMessages.toLocaleString() },
-                    { label: "agent.runtime.runs", value: usageSessions.toLocaleString() },
-                    { label: "agent.runtime.failed_runs", value: usageErrors.toLocaleString() },
-                    { label: "agent.messages.avg_tokens", value: avgTokensPerMessage.toLocaleString() },
-                    { label: "agent.armory.connected_servers", value: activeServers.toLocaleString() },
-                  ].map((item) => (
-                    <div
-                      key={item.label}
-                      className="rounded-lg border p-2 shadow-sm"
-                      style={{ borderColor: "#d4d4d8", backgroundColor: "#fafaf9" }}
-                    >
-                      <p className="text-[10px] uppercase text-gray-500">{item.label}</p>
-                      <p className="text-sm font-semibold text-gray-900">{item.value}</p>
-                    </div>
-                  ))}
+                <div className="min-w-0">
+                  <h3 className="text-xs font-bold uppercase tracking-wide text-gray-900">Key metrics</h3>
+                  <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
+                    {[
+                      { label: "Total tokens", value: usageTokens.toLocaleString() },
+                      { label: "Messages", value: usageMessages.toLocaleString() },
+                      { label: "Runs", value: usageSessions.toLocaleString() },
+                      { label: "Failed runs", value: usageErrors.toLocaleString() },
+                      { label: "Avg. tokens / message", value: avgTokensPerMessage.toLocaleString() },
+                      { label: "Connected servers", value: activeServers.toLocaleString() },
+                    ].map((item) => (
+                      <div key={item.label} className="min-w-0 rounded-lg border bg-white p-2.5 shadow-sm" style={{ borderColor: "#d4d4d8" }}>
+                        <p className="break-words text-[10px] font-medium leading-snug text-gray-500">{item.label}</p>
+                        <p className="mt-1 break-words text-sm font-bold text-gray-900">{item.value}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="min-w-0 rounded-xl border bg-white p-3 shadow-sm" style={{ borderColor: "#e4e4e7" }}>
+                  <h3 className="text-xs font-bold text-gray-900">Token breakdown</h3>
+                  <div className="mt-2 divide-y divide-gray-100 text-xs">
+                    {[
+                      ["Input", usage?.inputTokens ?? 0],
+                      ["Output", usage?.outputTokens ?? 0],
+                      ["Cached input", usage?.cachedTokens ?? 0],
+                      ["Reasoning", usage?.reasoningTokens ?? 0],
+                    ].map(([label, value]) => (
+                      <div key={String(label)} className="flex min-w-0 items-center justify-between gap-3 py-2 first:pt-0 last:pb-0">
+                        <span className="min-w-0 break-words text-gray-600">{label}</span>
+                        <strong className="shrink-0 text-gray-900">{Number(value).toLocaleString()}</strong>
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
                 {analyticsDetail && (
                   <>
-                    <div className="rounded-xl border p-2.5 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#f8fafc" }}>
-                      <p className="text-xs font-semibold text-gray-900 mb-2">llm</p>
-                      <div className="grid grid-cols-2 gap-2 text-[11px]">
-                        <div>llm.calls.total: <span className="font-semibold">{analyticsDetail.llm.calls.total}</span></div>
-                        <div>llm.calls.successful: <span className="font-semibold">{analyticsDetail.llm.calls.successful}</span></div>
-                        <div>llm.calls.failed: <span className="font-semibold">{analyticsDetail.llm.calls.failed}</span></div>
-                        <div>llm.calls.cached: <span className="font-semibold">{analyticsDetail.llm.calls.cached}</span></div>
-                        <div>llm.cost_usd.actual: <span className="font-semibold">${analyticsDetail.llm.cost_usd.actual.toFixed(4)}</span></div>
-                        <div>llm.cost_usd.estimated: <span className="font-semibold">${analyticsDetail.llm.cost_usd.estimated.toFixed(4)}</span></div>
+                    <div className="min-w-0 rounded-xl border p-3 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#f8fafc" }}>
+                      <h3 className="mb-2 text-xs font-bold text-gray-900">LLM calls</h3>
+                      <div className="grid min-w-0 grid-cols-2 gap-2 text-[11px]">
+                        {[
+                          ["Total", analyticsDetail.llm.calls.total],
+                          ["Successful", analyticsDetail.llm.calls.successful],
+                          ["Failed", analyticsDetail.llm.calls.failed],
+                          ["Cached", analyticsDetail.llm.calls.cached],
+                          ["Actual cost", `$${analyticsDetail.llm.cost_usd.actual.toFixed(4)}`],
+                          ["Estimated cost", `$${analyticsDetail.llm.cost_usd.estimated.toFixed(4)}`],
+                        ].map(([label, value]) => (
+                          <div key={String(label)} className="min-w-0 rounded-md bg-white p-2">
+                            <span className="block break-words text-gray-500">{label}</span>
+                            <strong className="mt-0.5 block break-words text-gray-900">{value}</strong>
+                          </div>
+                        ))}
                       </div>
                       <div className="mt-2 space-y-1">
-                        {(analyticsDetail.llm.models || []).slice(0, 3).map((m) => (
-                          <div key={m.model} className="flex items-center justify-between rounded border px-2 py-1" style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff" }}>
-                            <span className="truncate mr-2 text-[11px]">{m.model}</span>
-                            <span className="text-[10px] text-gray-600">llm.models[].tokens.total={m.tokens.total.toLocaleString()} • llm.models[].cost_usd.total=${m.cost_usd.total.toFixed(4)}</span>
+                        {(analyticsDetail.llm.models || []).slice(0, 3).map((m) => {
+                          const modelLabel = analyticsModelLabel(m.model, m.cost_usd.total);
+                          const isCacheBucket = modelLabel === "Cache";
+                          return (
+                          <div key={m.model} className="min-w-0 rounded border p-2" style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff" }}>
+                            <strong className="block break-all text-[11px] text-gray-900">{modelLabel}</strong>
+                            <span className="mt-1 block break-words text-[10px] leading-relaxed text-gray-600">
+                              {m.tokens.total.toLocaleString()} tokens · ${m.cost_usd.total.toFixed(4)}
+                            </span>
+                            {isCacheBucket && <span className="mt-1 block text-[9px] text-gray-400">Cached response activity</span>}
+                          </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="min-w-0 rounded-xl border p-3 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#f8fafc" }}>
+                      <h3 className="mb-2 text-xs font-bold text-gray-900">Planning & runtime</h3>
+                      <div className="space-y-2 text-[11px]">
+                        {[
+                          ["Planner invocations", analyticsDetail.agent.planner.invocations.toLocaleString()],
+                          ["Plans created", analyticsDetail.agent.planner.plans_created.toLocaleString()],
+                          ["Failed steps", analyticsDetail.agent.planner.steps_failed.toLocaleString()],
+                          ["Planning overhead", `${analyticsDetail.agent.planner.current_plan_overhead.total_tokens.toLocaleString()} tokens`],
+                          ["Total runtime", `${analyticsDetail.agent.runtime.total_ms.toLocaleString()} ms`],
+                          ["LLM runtime", `${analyticsDetail.agent.runtime.splits.llm_ms.toLocaleString()} ms`],
+                        ].map(([label, value]) => (
+                          <div key={String(label)} className="flex min-w-0 justify-between gap-3">
+                            <span className="min-w-0 break-words text-gray-600">{label}</span>
+                            <strong className="shrink-0 text-right text-gray-900">{value}</strong>
                           </div>
                         ))}
                       </div>
                     </div>
 
-                    <div className="rounded-xl border p-2.5 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#f8fafc" }}>
-                      <p className="text-xs font-semibold text-gray-900 mb-2">agent.planner and agent.runtime</p>
-                      <div className="grid grid-cols-2 gap-2 text-[11px]">
-                        <div>agent.planner.invocations: <span className="font-semibold">{analyticsDetail.agent.planner.invocations}</span></div>
-                        <div>agent.planner.plans_created: <span className="font-semibold">{analyticsDetail.agent.planner.plans_created}</span></div>
-                        <div>agent.planner.steps_failed: <span className="font-semibold">{analyticsDetail.agent.planner.steps_failed}</span></div>
-                        <div>agent.planner.current_plan_overhead.total_tokens: <span className="font-semibold">{analyticsDetail.agent.planner.current_plan_overhead.total_tokens}</span></div>
-                        <div>agent.runtime.total_ms: <span className="font-semibold">{analyticsDetail.agent.runtime.total_ms.toLocaleString()}</span></div>
-                        <div>agent.runtime.splits.llm_ms: <span className="font-semibold">{analyticsDetail.agent.runtime.splits.llm_ms.toLocaleString()}</span></div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border p-2.5 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#f8fafc" }}>
-                      <p className="text-xs font-semibold text-gray-900 mb-2">agent.context, agent.armory, agent.memory</p>
-                      <div className="grid grid-cols-2 gap-2 text-[11px]">
-                        <div>agent.context.latest.total_tokens: <span className="font-semibold">{analyticsDetail.agent.context.latest.total_tokens.toLocaleString()}</span></div>
-                        <div>agent.context.aggregate.average_tokens: <span className="font-semibold">{analyticsDetail.agent.context.aggregate.average_tokens.toLocaleString()}</span></div>
-                        <div>agent.armory.configured.tools: <span className="font-semibold">{analyticsDetail.agent.armory.configured.tools}</span></div>
-                        <div>agent.armory.configured.mcp_servers: <span className="font-semibold">{analyticsDetail.agent.armory.configured.mcp_servers}</span></div>
-                        <div>agent.memory.chunks_extracted: <span className="font-semibold">{analyticsDetail.agent.memory.chunks_extracted}</span></div>
-                        <div>agent.memory.extraction_failures: <span className="font-semibold">{analyticsDetail.agent.memory.extraction_failures}</span></div>
+                    <div className="min-w-0 rounded-xl border p-3 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#f8fafc" }}>
+                      <h3 className="mb-2 text-xs font-bold text-gray-900">Context, armory & memory</h3>
+                      <div className="space-y-2 text-[11px]">
+                        {[
+                          ["Latest context", `${analyticsDetail.agent.context.latest.total_tokens.toLocaleString()} tokens`],
+                          ["Average context", `${analyticsDetail.agent.context.aggregate.average_tokens.toLocaleString()} tokens`],
+                          ["Configured tools", analyticsDetail.agent.armory.configured.tools.toLocaleString()],
+                          ["Configured MCP servers", analyticsDetail.agent.armory.configured.mcp_servers.toLocaleString()],
+                          ["Memory chunks extracted", analyticsDetail.agent.memory.chunks_extracted.toLocaleString()],
+                          ["Memory extraction failures", analyticsDetail.agent.memory.extraction_failures.toLocaleString()],
+                        ].map(([label, value]) => (
+                          <div key={String(label)} className="flex min-w-0 justify-between gap-3">
+                            <span className="min-w-0 break-words text-gray-600">{label}</span>
+                            <strong className="shrink-0 text-right text-gray-900">{value}</strong>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   </>
@@ -522,29 +645,46 @@ export default function ChatRightSidebar({
         </TabsContent>
 
         <TabsContent value="armory" className="mt-0 flex-1 overflow-hidden p-3">
-          <div className="mb-2 grid grid-cols-4 gap-1">
-            <Button size="sm" variant={armoryTab === "policy" ? "default" : "outline"} className="text-[10px] px-2 shadow-sm data-[state=active]:bg-yellow-300" onClick={() => setArmoryTab("policy")}>Policy</Button>
-            <Button size="sm" variant={armoryTab === "tools" ? "default" : "outline"} className="text-[10px] px-2 shadow-sm data-[state=active]:bg-yellow-300" onClick={() => setArmoryTab("tools")}>Tools</Button>
-            <Button size="sm" variant={armoryTab === "subagents" ? "default" : "outline"} className="text-[10px] px-2 shadow-sm data-[state=active]:bg-yellow-300" onClick={() => setArmoryTab("subagents")}>Subagents</Button>
-            <Button size="sm" variant={armoryTab === "servers" ? "default" : "outline"} className="text-[10px] px-2 shadow-sm data-[state=active]:bg-yellow-300" onClick={() => setArmoryTab("servers")}>Servers</Button>
+          <div className="mb-3 rounded-xl border border-gray-200 bg-white p-1.5 shadow-sm">
+            <div className="grid grid-cols-2 gap-1.5">
+              {([
+                ["policy", "Policy", ShieldCheck],
+                ["tools", "Tools", Wrench],
+                ["subagents", "Subagents", Bot],
+                ["servers", "Servers", Server],
+              ] as const).map(([tab, label, Icon]) => (
+                <Button
+                  key={tab}
+                  size="sm"
+                  variant="ghost"
+                  aria-pressed={armoryTab === tab}
+                  className={`h-8 justify-start gap-2 px-2.5 text-[11px] ${armoryTab === tab ? "bg-yellow-300 font-semibold text-gray-950 hover:bg-yellow-300" : "text-gray-600 hover:bg-gray-100"}`}
+                  onClick={() => setArmoryTab(tab)}
+                >
+                  <Icon className="h-3.5 w-3.5" /> {label}
+                </Button>
+              ))}
+            </div>
           </div>
 
-          <ScrollArea className="h-[calc(100%-2.25rem)] pr-1">
+          <ScrollArea className="h-[calc(100%-5rem)] pr-2">
             {armoryTab === "policy" && (
               <div className="space-y-3">
-                <div className="rounded-xl border p-2.5 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#fefce8" }}>
-                  <p className="text-xs font-semibold text-gray-900 mb-2">Policy-configured resource types</p>
-                  {!policyData ? (
-                    <p className="text-xs text-gray-600">Select a chat session to load policy resources.</p>
-                  ) : (
-                    Object.keys(policyData.policy.armory.resources || {}).sort().map((group) => (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-950">Resource policy</h3>
+                  <p className="mt-0.5 text-[11px] leading-4 text-gray-500">Control which configured capabilities this agent may use.</p>
+                </div>
+                {!policyData ? (
+                  <p className="rounded-xl border border-dashed border-gray-300 bg-white p-5 text-center text-xs text-gray-600">Select a chat session to load policy resources.</p>
+                ) : policyResourceGroups.length > 0 && (
+                  <div className="space-y-2">
+                    {policyResourceGroups.map(([group, resources]) => (
                       <div
                         key={group}
-                        className="mb-2 rounded-lg border p-2 shadow-sm"
-                        style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff", boxShadow: "inset 3px 0 0 #facc15" }}
+                        className="min-w-0 rounded-xl border border-gray-200 bg-white p-3 shadow-sm"
                       >
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2">
+                        <div className="mb-3 flex items-start justify-between gap-2">
+                          <div className="flex min-w-0 items-center gap-2">
                             <Checkbox
                               checked={Boolean(policyData.policy.armory.groups[group]?.enabled)}
                               disabled={policySaving}
@@ -559,16 +699,18 @@ export default function ChatRightSidebar({
                                 });
                               }}
                             />
-                            <p className="text-xs font-semibold text-gray-900 uppercase tracking-wide">{group}</p>
+                            <div className="min-w-0">
+                              <p className="break-words text-xs font-bold capitalize text-gray-950">{group.replace(/_/g, " ")}</p>
+                              <p className="text-[10px] text-gray-500">{resources.filter((resource) => resource.enabled).length} enabled</p>
+                            </div>
                           </div>
-                          <Badge variant="outline" className="text-[10px] border-yellow-300 bg-yellow-50">{policyData.policy.armory.resources[group]?.length || 0}</Badge>
+                          <Badge variant="outline" className="shrink-0 border-yellow-300 bg-yellow-50 text-[10px]">{resources.length}</Badge>
                         </div>
-                        <div className="space-y-1.5 pl-6">
-                          {(policyData.policy.armory.resources[group] || []).map((resource) => (
+                        <div className="grid grid-cols-1 gap-1.5 min-[560px]:grid-cols-2">
+                          {resources.map((resource) => (
                             <label
                               key={`${group}:${resource.name}`}
-                              className="flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs text-gray-700"
-                              style={{ borderColor: "#e4e4e7", backgroundColor: "#fafafa" }}
+                              className="flex min-w-0 items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 p-2 text-xs text-gray-700"
                             >
                               <Checkbox
                                 checked={resource.enabled}
@@ -587,15 +729,15 @@ export default function ChatRightSidebar({
                                   });
                                 }}
                               />
-                              <Badge variant="outline" className="font-mono text-[9px] border-gray-300 bg-white">{resource.type}</Badge>
-                              <span className="font-medium">{resource.name}</span>
+                              <span className="min-w-0 flex-1 break-all font-medium">{resource.name}</span>
+                              <Badge variant="outline" className="shrink-0 border-gray-300 bg-white font-mono text-[9px]">{resource.type}</Badge>
                             </label>
                           ))}
                         </div>
                       </div>
-                    ))
-                  )}
-                </div>
+                    ))}
+                  </div>
+                )}
 
                 <div className="rounded-xl border p-2.5 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#f4f4f5" }}>
                   <div className="mb-2 flex items-center justify-between">
@@ -671,7 +813,14 @@ export default function ChatRightSidebar({
 
             {armoryTab === "tools" && (
               <div className="space-y-2">
-                <Input placeholder="Search tools" value={toolSearch} onChange={(e) => setToolSearch(e.target.value)} />
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-950">Available tools</h3>
+                  <p className="mt-0.5 text-[11px] leading-4 text-gray-500">Choose which capabilities this session can use.</p>
+                </div>
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                  <Input aria-label="Search tools" className="pl-8" placeholder="Search by tool name…" value={toolSearch} onChange={(e) => setToolSearch(e.target.value)} />
+                </div>
                 <div className="flex items-center justify-between">
                   <p className="text-xs text-gray-600">{filteredTools.length} tools</p>
                   <div className="flex gap-1">
@@ -679,66 +828,87 @@ export default function ChatRightSidebar({
                     <Button size="sm" variant="outline" className="text-[10px] h-7" onClick={() => setEnabledTools([])}>Disable all</Button>
                   </div>
                 </div>
-                {filteredTools.map((tool) => (
-                  <label
-                    key={tool.name}
-                    className="flex items-center gap-2 rounded-lg border p-2.5 text-xs shadow-sm"
-                    style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff", boxShadow: "inset 2px 0 0 #facc15" }}
-                  >
-                    <Checkbox checked={isToolEnabled(tool.name)} onCheckedChange={() => toggleTool(tool.name)} />
-                    <div className="min-w-0">
-                      <p className="text-gray-900 font-semibold truncate">{tool.name}</p>
-                      {tool.description && <p className="text-gray-600 text-[11px] line-clamp-2">{tool.description}</p>}
+                {filteredTools.length === 0 && (
+                  <div className="rounded-xl border border-dashed border-gray-300 bg-white p-5 text-center text-xs text-gray-500">
+                    {tools.length ? "No tools match your search." : "No tools are available for this agent."}
+                  </div>
+                )}
+                <div className="space-y-2">
+                  {filteredTools.map((tool) => (
+                    <div key={tool.name} className="flex min-w-0 flex-col rounded-xl border border-gray-200 bg-white p-3 text-xs shadow-sm">
+                      <div className="flex items-start gap-2">
+                        <Checkbox className="mt-0.5" checked={isToolEnabled(tool.name)} onCheckedChange={() => toggleTool(tool.name)} />
+                        <div className="min-w-0 flex-1">
+                          <p className="break-all font-bold text-gray-950">{tool.name}</p>
+                          {tool.server_name && <Badge variant="outline" className="mt-1 border-blue-200 bg-blue-50 text-[9px] text-blue-700">MCP · {tool.server_name}</Badge>}
+                          {tool.description && <p className="mt-1 line-clamp-3 break-words text-[11px] leading-4 text-gray-600">{tool.description}</p>}
+                        </div>
+                      </div>
+                      <div className="mt-auto flex items-center justify-between gap-2 pt-3">
+                        <Badge variant="outline" className="border-gray-300 bg-yellow-50 text-[9px]">{isToolEnabled(tool.name) ? "Enabled" : "Disabled"}</Badge>
+                        <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px]" onClick={() => setArmoryDetail({ kind: "tool", item: tool })}>
+                          <Expand className="mr-1 h-3 w-3" /> Expand
+                        </Button>
+                      </div>
                     </div>
-                    <Badge variant="outline" className="ml-auto text-[9px] border-gray-300 bg-yellow-50">
-                      {isToolEnabled(tool.name) ? "enabled" : "disabled"}
-                    </Badge>
-                  </label>
-                ))}
+                  ))}
+                </div>
               </div>
             )}
 
             {armoryTab === "subagents" && (
               <div className="space-y-2">
-                <p className="text-xs text-gray-600">{subagents.length} configured subagents</p>
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-950">Subagents</h3>
+                  <p className="mt-0.5 text-[11px] leading-4 text-gray-500">{subagents.length} specialist {subagents.length === 1 ? "agent" : "agents"} available for delegated work.</p>
+                </div>
+                {subagents.length === 0 && <div className="rounded-xl border border-dashed border-gray-300 bg-white p-5 text-center text-xs text-gray-500">No subagents are configured.</div>}
+                <div className="space-y-2">
                 {subagents.map((agent) => (
                   <div
                     key={agent.name}
-                    className="rounded-lg border p-2.5 shadow-sm"
-                    style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff", boxShadow: "inset 2px 0 0 #facc15" }}
+                    className="flex min-w-0 flex-col rounded-xl border border-gray-200 bg-white p-3 shadow-sm"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <div>
-                        <p className="text-xs font-semibold text-gray-900">{agent.display_name || agent.name}</p>
-                        {agent.description && <p className="text-[11px] text-gray-600 line-clamp-2">{agent.description}</p>}
+                      <div className="min-w-0">
+                        <p className="break-words text-xs font-semibold text-gray-900">{agent.display_name || agent.name}</p>
+                        {agent.description && <div className="mt-1 whitespace-pre-wrap break-words text-[11px] leading-4 text-gray-600">{agent.description}</div>}
                         <div className="mt-1 flex items-center gap-1.5">
                           {agent.source && <Badge variant="outline" className="text-[9px] border-gray-300 bg-gray-50">{agent.source}</Badge>}
                           {agent.status && <Badge variant="outline" className="text-[9px] border-gray-300 bg-yellow-50">{agent.status}</Badge>}
                         </div>
                       </div>
-                      <Sparkles className="h-3.5 w-3.5 text-gray-500" />
+                      <Sparkles className="h-3.5 w-3.5 shrink-0 text-gray-500" />
                     </div>
+                    <Button size="sm" variant="ghost" className="mt-2 h-7 self-end px-2 text-[10px]" onClick={() => setArmoryDetail({ kind: "subagent", item: agent })}>
+                      <Expand className="mr-1 h-3 w-3" /> Expand
+                    </Button>
                   </div>
                 ))}
+                </div>
               </div>
             )}
 
             {armoryTab === "servers" && (
               <div className="space-y-2">
-                <p className="text-xs text-gray-600">{servers.length} configured servers</p>
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-950">MCP servers</h3>
+                  <p className="mt-0.5 text-[11px] leading-4 text-gray-500">{activeServers} connected of {servers.length} configured.</p>
+                </div>
+                {servers.length === 0 && <div className="rounded-xl border border-dashed border-gray-300 bg-white p-5 text-center text-xs text-gray-500">No MCP servers are configured.</div>}
+                <div className="space-y-2">
                 {servers.map((server) => (
                   <div
                     key={server.id}
-                    className="rounded-lg border p-2.5 shadow-sm"
-                    style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff", boxShadow: "inset 2px 0 0 #facc15" }}
+                    className="min-w-0 overflow-hidden rounded-xl border border-gray-200 bg-white p-3 shadow-sm"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
-                        <p className="text-xs font-semibold text-gray-900 truncate">{server.name}</p>
-                        <p className="text-[11px] text-gray-600 truncate">{server.url || server.command}</p>
+                        <p className="break-words text-xs font-semibold text-gray-900">{server.name}</p>
+                        <p className="mt-0.5 break-all font-mono text-[10px] leading-4 text-gray-500">{server.url || server.command || "No endpoint provided"}</p>
                       </div>
                     </div>
-                    <div className="mt-2 flex items-center justify-between gap-2">
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                       <Badge
                         variant="outline"
                         className="text-[10px]"
@@ -751,6 +921,9 @@ export default function ChatRightSidebar({
                         {server.is_connected ? "Connected" : "Disconnected"}
                       </Badge>
                       <div className="flex items-center gap-1.5">
+                        <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px]" onClick={() => setArmoryDetail({ kind: "server", item: server })}>
+                          <Expand className="mr-1 h-3 w-3" /> Expand
+                        </Button>
                         <Button
                           size="sm"
                           variant="outline"
@@ -782,20 +955,65 @@ export default function ChatRightSidebar({
                         )}
                       </div>
                     </div>
+                    {server.is_connected && (
+                      <div className="mt-3 border-t border-gray-100 pt-3">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Discovered MCP capabilities</p>
+                        {(serverDetails[server.id]?.tools?.length || 0) > 0 ? (
+                          <div className="mt-1.5 grid grid-cols-1 gap-1.5 min-[560px]:grid-cols-2">
+                            {serverDetails[server.id].tools!.map((tool) => (
+                              <div key={tool.name} className="min-w-0 rounded-lg border border-blue-100 bg-blue-50 p-2">
+                                <p className="break-all text-[11px] font-semibold text-gray-900">{tool.name}</p>
+                                {tool.description && <p className="mt-0.5 break-words text-[10px] leading-4 text-gray-600">{tool.description}</p>}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="mt-1 text-[11px] text-gray-500">No tools discovered.</p>
+                        )}
+                        {(serverDetails[server.id]?.resources?.length || 0) > 0 && (
+                          <div className="mt-2">
+                            <p className="text-[10px] font-semibold text-gray-600">Resources</p>
+                            <div className="mt-1 grid grid-cols-1 gap-1.5 min-[560px]:grid-cols-2">
+                              {serverDetails[server.id].resources!.map((resource) => (
+                                <div key={resource.uri} className="min-w-0 rounded-lg border border-gray-200 bg-gray-50 p-2">
+                                  <p className="break-words text-[11px] font-medium text-gray-900">{resource.name || resource.uri}</p>
+                                  {resource.name && <p className="mt-0.5 break-all font-mono text-[9px] text-gray-500">{resource.uri}</p>}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
+                </div>
               </div>
             )}
           </ScrollArea>
         </TabsContent>
 
         <TabsContent value="memory" className="mt-0 flex-1 overflow-hidden p-3">
-          <ScrollArea className="h-full pr-1">
-            <div className="space-y-3">
-              <div className="rounded-xl border p-2.5 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#fefce8" }}>
-                <div className="flex items-center gap-2 mb-1">
-                  <Brain className="h-3.5 w-3.5 text-gray-600" />
-                  <p className="text-xs font-semibold text-gray-900">Conversation memory chunks</p>
+          <ScrollArea className="h-full pr-2">
+            <div className="space-y-3 pb-5">
+              <div className="rounded-xl border border-yellow-300 bg-gradient-to-br from-yellow-50 to-white p-3.5 shadow-sm">
+                <div className="flex items-start gap-2.5">
+                  <div className="rounded-lg bg-yellow-300 p-2 text-gray-950"><Brain className="h-4 w-4" /></div>
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold text-gray-950">Session memory</h3>
+                    <p className="mt-0.5 text-[11px] leading-4 text-gray-600">Review what was extracted from this conversation and what the agent currently remembers.</p>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <div className="rounded-lg border border-gray-200 bg-white p-2"><span className="block text-[10px] text-gray-500">Extraction requests</span><strong className="text-sm text-gray-950">{memoryChunks.length}</strong></div>
+                  <div className="rounded-lg border border-gray-200 bg-white p-2"><span className="block text-[10px] text-gray-500">Stored entries</span><strong className="text-sm text-gray-950">{memoryEntries.length}</strong></div>
+                </div>
+              </div>
+
+              <section className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
+                <div className="mb-2 flex items-center gap-2">
+                  <Database className="h-3.5 w-3.5 text-gray-500" />
+                  <h3 className="text-xs font-semibold text-gray-900">Extraction activity</h3>
                 </div>
                 {!agentId ? (
                   <p className="text-xs text-gray-600">Select a chat to view chunk extraction from this conversation.</p>
@@ -804,16 +1022,19 @@ export default function ChatRightSidebar({
                 ) : (
                   <div className="space-y-1.5">
                     {memoryChunks.map((chunk, idx) => (
-                      <div
+                      <details
                         key={`chunk-${idx}`}
-                        className="rounded-lg border p-2.5 shadow-sm"
+                        className="group rounded-lg border p-2.5 shadow-sm"
                         style={{
                           borderColor: memoryStateTone(String(chunk.state || "pending")).border,
                           backgroundColor: memoryStateTone(String(chunk.state || "pending")).bg,
                         }}
                       >
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-[11px] text-gray-900 font-medium">{String(chunk.request_id || `chunk-${idx}`)}</p>
+                        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 [&::-webkit-details-marker]:hidden">
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-semibold text-gray-900">Extraction {idx + 1}</p>
+                            <p className="truncate font-mono text-[9px] text-gray-500">{String(chunk.request_id || `chunk-${idx}`)}</p>
+                          </div>
                           <Badge
                             variant="outline"
                             className="text-[10px]"
@@ -825,43 +1046,53 @@ export default function ChatRightSidebar({
                           >
                             {formatStateLabel(String(chunk.state || "pending"))}
                           </Badge>
-                        </div>
-                        <p className="text-[10px] text-gray-600 mt-1 line-clamp-2">{String(chunk.reason || "No reason provided")}</p>
-                      </div>
+                        </summary>
+                        <div className="mt-2 border-t border-black/10 pt-2"><FormattedText>{String(chunk.reason || "No reason provided")}</FormattedText></div>
+                      </details>
                     ))}
                   </div>
                 )}
-              </div>
+              </section>
 
-              <div className="rounded-xl border p-2.5 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#f4f4f5" }}>
-                <div className="flex items-center justify-between gap-2 mb-1">
-                  <p className="text-xs font-semibold text-gray-900">Current memory store</p>
-                  <Badge variant="outline" className="text-[10px] border-yellow-300 bg-yellow-50">{memoryEntries.length}</Badge>
+              <section className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-xs font-semibold text-gray-900">Current memory store</h3>
+                    <p className="mt-0.5 text-[10px] text-gray-500">Select an entry to read its full contents.</p>
+                  </div>
+                  <Badge variant="outline" className="border-yellow-300 bg-yellow-50 text-[10px]">{filteredMemoryEntries.length}</Badge>
                 </div>
-                <div className="space-y-1.5 max-h-40 overflow-auto">
+                <div className="relative mb-2">
+                  <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                  <Input aria-label="Search memory" className="pl-8" placeholder="Search keys, content, or categories…" value={memorySearch} onChange={(event) => setMemorySearch(event.target.value)} />
+                </div>
+                <div className="space-y-1.5">
                   {memoryEntries.length === 0 ? (
                     <p className="text-xs text-gray-600">No memory entries yet.</p>
+                  ) : filteredMemoryEntries.length === 0 ? (
+                    <p className="rounded-lg border border-dashed border-gray-300 p-4 text-center text-xs text-gray-500">No memories match your search.</p>
                   ) : (
-                    memoryEntries.slice(0, 30).map((entry) => (
-                      <div
+                    filteredMemoryEntries.slice(0, 30).map((entry) => (
+                      <details
                         key={`${entry.category || "memory"}:${entry.key}`}
-                        className="rounded-lg border p-2 shadow-sm"
+                        className="group rounded-lg border p-2.5 shadow-sm open:border-yellow-300 open:bg-yellow-50/40"
                         style={{ borderColor: "#d4d4d8", backgroundColor: "#ffffff", boxShadow: "inset 2px 0 0 #a1a1aa" }}
                       >
-                        <div className="flex items-center justify-between gap-2 mb-0.5">
-                          <p className="text-[11px] font-semibold text-gray-900 truncate">{entry.key}</p>
+                        <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
+                          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-gray-400 transition-transform group-open:rotate-90" />
+                          <p className="min-w-0 flex-1 break-words text-[11px] font-semibold text-gray-900">{entry.key}</p>
                           {entry.category && (
-                            <Badge variant="outline" className="text-[9px] border-gray-300 bg-gray-50">
+                            <Badge variant="outline" className="shrink-0 border-gray-300 bg-gray-50 text-[9px]">
                               {entry.category}
                             </Badge>
                           )}
-                        </div>
-                        <p className="text-[10px] text-gray-600 line-clamp-2">{entry.value}</p>
-                      </div>
+                        </summary>
+                        <div className="mt-2 border-t border-gray-200 pt-2"><FormattedText>{entry.value}</FormattedText></div>
+                      </details>
                     ))
                   )}
                 </div>
-              </div>
+              </section>
 
               <div className="rounded-xl border p-2.5 shadow-sm" style={{ borderColor: "#e4e4e7", backgroundColor: "#f4f4f5" }}>
                 <button
@@ -882,6 +1113,35 @@ export default function ChatRightSidebar({
           </ScrollArea>
         </TabsContent>
       </Tabs>
+      <Dialog open={Boolean(armoryDetail)} onOpenChange={(open) => !open && setArmoryDetail(null)}>
+        <DialogContent className="max-h-[80vh] max-w-2xl overflow-hidden bg-white">
+          <DialogHeader>
+            <DialogTitle className="break-words pr-8">{detailTitle || "Armory details"}</DialogTitle>
+            <DialogDescription>
+              {armoryDetail?.kind === "server" ? "MCP server configuration and connection information."
+                : armoryDetail?.kind === "subagent" ? "Subagent capabilities and availability."
+                  : "Tool description, source, and parameters."}
+            </DialogDescription>
+          </DialogHeader>
+          <ScrollArea className="max-h-[60vh] pr-3">
+            {armoryDetail && (
+              <pre className="whitespace-pre-wrap break-all rounded-xl border border-gray-200 bg-gray-50 p-4 font-mono text-xs leading-5 text-gray-800">
+                {JSON.stringify(
+                  armoryDetail.kind === "server"
+                    ? {
+                        ...armoryDetail.item,
+                        env: armoryDetail.item.env ? Object.fromEntries(Object.keys(armoryDetail.item.env).map((key) => [key, "[REDACTED]"])) : undefined,
+                        auth: armoryDetail.item.auth ? { ...armoryDetail.item.auth, password: undefined } : undefined,
+                      }
+                    : armoryDetail.item,
+                  null,
+                  2,
+                )}
+              </pre>
+            )}
+          </ScrollArea>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

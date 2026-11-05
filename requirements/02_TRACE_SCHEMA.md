@@ -167,6 +167,10 @@ Stack traces are optional and environment-gated.
 - `node.execution.end`
 - `node.execution.error`
 - `node.routing.decision`
+- `preflight.stage` (bounded stage outcome; no request text or credentials)
+- `preflight.decision` (final decision and approved-resource count)
+- `run.timing.step` (one completed, ordered runtime stage or graph-transport gap)
+- `run.timing.summary` (per-run total, stage totals and slowest stages)
 
 ### 7.4 Tooling and armory
 - `armory.discovery.list`
@@ -180,6 +184,7 @@ Stack traces are optional and environment-gated.
 - `memory.retrieve.start`
 - `memory.retrieve.end`
 - `memory.retrieve.denied`
+- `memory.embedding.start`, `memory.embedding.end`, `memory.embedding.error` (local embedding-model load and encode time)
 - `memory.write.start`
 - `memory.write.end`
 - `memory.write.denied`
@@ -231,11 +236,21 @@ Stack traces are optional and environment-gated.
 - `node.routing.decision`
   - `node`, `action`, `tool_name` or `agent_name`, `task`
 
+- `preflight.stage`, `preflight.decision`
+  - `stage`, `decision`, `reason_code`, `returned_count` (where applicable)
+
+- `run.timing.step`, `run.timing.summary`
+  - `stage` (fixed stage identifier), `node` (graph node when applicable), `reason_code` (failure category)
+  - `metrics.duration_ms` is elapsed monotonic time; `data` never contains query text, arguments or results
+  - summaries also include bounded `stage_totals_ms`, `slowest_steps`, `elapsed_ms`, `step_count` and `unattributed_ms` (capped at five slowest steps)
+
 - `tool.call.*`
   - `tool_name`, `task`, `arg_keys`, `success`
 
 - `memory.retrieve.*`
   - `query_hash`, `top_k`, `returned_count`, `scope_counts`, `policy_version`
+- `memory.embedding.*`
+  - `stage` (`model_load` or `encode`), `embedding_method`; no model path or input text
 - `memory.promotion.*` (Phase 2)
   - `promotion_request_id`, `source_chunk_id`, `target_chunk_id` (if created), `from_scope`, `to_scope`, `policy_version`
 

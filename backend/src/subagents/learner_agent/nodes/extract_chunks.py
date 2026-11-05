@@ -14,6 +14,7 @@ from src.subagents.learner_agent.keys import build_embed_text
 from src.subagents.learner_agent.state import LearnerState
 from src.models.llm_client import call_llm
 from src.prompts.prompt_loader import load_prompt
+from src.agent.nodes.output_security_gate import sanitize_value
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +59,36 @@ def _normalize_chunk(
     uid: str,
     agent_id: str,
     user_query: str,
-    step_index: int,
-    history: list[dict[str, Any]],
+    step_index: int = 0,
+    history: list[dict[str, Any]] | None = None,
+    checkpoint_id: str = "",
+    allowed_types: set[str] | None = None,
+    observed_resources: set[tuple[str, str]] | None = None,
 ) -> dict[str, Any] | None:
+    history = history or []
+    if raw.get("content"):
+        content = str(raw["content"]).strip()
+        if not content or sanitize_value(content) != content:
+            return None
+        chunk_type = str(raw.get("chunk_type") or "")
+        if allowed_types is not None and chunk_type not in allowed_types:
+            return None
+        metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        resource_type = str(metadata.get("resource_type") or "")
+        resource_name = str(metadata.get("resource_name") or "")
+        if chunk_type == "resource":
+            observed = observed_resources or set()
+            if resource_type == "mcp_server":
+                allowed = ("tool", resource_name) in observed and resource_name.startswith("mcp_")
+            else:
+                allowed = (resource_type, resource_name) in observed
+            if not allowed:
+                return None
+        return {"id": f"exp_{uuid.uuid4().hex[:16]}", "chunk_type": chunk_type,
+                "advice": content, "embed_text": build_embed_text(user_query),
+                "metadata": {**metadata, "uid": uid, "source_agent_id": agent_id,
+                             "checkpoint_id": checkpoint_id, "semantic_key": raw.get("semantic_key")}}
+
     advice = (raw.get("advice") or "").strip()
     if not advice:
         return None
@@ -144,6 +172,8 @@ def extract_chunks_node(state: LearnerState) -> dict:
         agent_id = state.get("agent_id") or ""
         user_query = state.get("user_query") or ""
         chunks: list[dict[str, Any]] = []
+        observed = {(str(item.get("resource_type") or ""), str(item.get("resource_name") or ""))
+                    for item in history if isinstance(item, dict) and item.get("resource_name")}
         for i, raw in enumerate(raw_chunks):
             if not isinstance(raw, dict):
                 continue
@@ -163,6 +193,9 @@ def extract_chunks_node(state: LearnerState) -> dict:
                 user_query=user_query,
                 step_index=step_index,
                 history=history,
+                checkpoint_id=str(state.get("branch_checkpoint_id") or ""),
+                allowed_types=set(state.get("allowed_chunk_types") or ["workflow"]),
+                observed_resources=observed,
             )
             if normalized:
                 chunks.append(normalized)

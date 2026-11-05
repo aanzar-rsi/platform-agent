@@ -25,6 +25,22 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 import httpx
+from api.services.mcp_auth import McpBearerAuth
+
+from api.core import deps
+from src.utils.trace import emit as trace_emit, in_run
+
+
+def _auth_headers(server: dict[str, Any]) -> dict[str, str]:
+    metadata = server.get("metadata") if isinstance(server.get("metadata"), dict) else {}
+    raw = metadata.get("auth_headers")
+    if not isinstance(raw, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
+            headers[key.strip()] = value.strip()
+    return headers
 
 logger = logging.getLogger(__name__)
 TIMEOUT = 15
@@ -33,7 +49,8 @@ RECONNECT_DELAY = 30
 
 
 class McpConnection:
-    def __init__(self, server: dict[str, Any]) -> None:
+    def __init__(self, uid: str, server: dict[str, Any]) -> None:
+        self.uid = uid
         self.server = server
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"mcp-{server['id']}")
@@ -91,10 +108,18 @@ class McpConnection:
             elif self.server.get("transport") == "sse" or (
                 not self.server.get("transport") and self.server["url"].rstrip("/").endswith("/sse")
             ):
-                transport = sse_client(self.server["url"], timeout=TIMEOUT)
+                headers = _auth_headers(self.server)
+                try:
+                    transport = sse_client(self.server["url"], timeout=TIMEOUT, headers=headers,
+                                           auth=self._http_auth())
+                except TypeError:
+                    transport = sse_client(self.server["url"], timeout=TIMEOUT, headers=headers)
                 self.tools = await self._open_session(transport)
             else:
-                client = await self.stack.enter_async_context(httpx.AsyncClient(timeout=TIMEOUT))
+                headers = _auth_headers(self.server)
+                client = await self.stack.enter_async_context(
+                    httpx.AsyncClient(timeout=TIMEOUT, headers=headers or None, auth=self._http_auth())
+                )
                 transport = streamable_http_client(self.server["url"], http_client=client)
                 self.tools = await self._open_session(transport)
             self.stopping = asyncio.Event()
@@ -113,6 +138,19 @@ class McpConnection:
                 logger.debug("MCP transport cleanup after failure: %s", exc)
             self.session = None
             self.stack = None
+
+    def _http_auth(self) -> McpBearerAuth | None:
+        if not self.server.get("_auth"):
+            return None
+
+        def save_token(auth: dict[str, Any]) -> None:
+            self.server["_auth"] = auth
+            from api.core.deps import get_repos
+            current = get_repos().mcp.get(self.uid, self.server["id"])
+            if current:
+                get_repos().mcp.update(self.uid, self.server["id"], metadata={**current["metadata"], "_auth": auth})
+
+        return McpBearerAuth(self.server, save_token)
 
     async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if self.session is None:
@@ -149,9 +187,10 @@ class McpConnection:
                 self.loop.call_soon_threadsafe(self.stopping.set)
             if self.worker:
                 self.worker.result(timeout=5)
-        except Exception:
-            if self.ready.done() and self.ready.exception() is None:
-                logger.exception("Failed to close MCP session %s", self.server["id"])
+        except BaseException as exc:
+            # anyio cancellation scopes may report cancellation while a stale
+            # HTTP transport is shutting down; cleanup must not block reconnect.
+            logger.debug("MCP session cleanup for %s: %s", self.server["id"], exc)
         finally:
             self.session = None
             self.loop.call_soon_threadsafe(self.loop.stop)
@@ -185,7 +224,7 @@ class McpRuntime:
             stale = self._connections.pop(key, None)
             if stale:
                 stale.close()
-            conn = McpConnection(server)
+            conn = McpConnection(uid, server)
             conn.thread.start()
             conn.worker = asyncio.run_coroutine_threadsafe(conn._serve(), conn.loop)
             try:
@@ -252,11 +291,8 @@ class McpTool:
 def available_mcp_tools(uid: str | None, *, reconnect: bool = False) -> dict[str, McpTool]:
     if not uid:
         return {}
-    from api.core.deps import get_repos
-
-    from src.utils.trace import in_run, emit
     result = {}
-    for server in get_repos().mcp.list(uid):
+    for server in deps.get_repos().mcp.list(uid):
         if not server["enabled"]:
             continue
         conn = mcp_runtime.get(uid, server["id"])
@@ -278,15 +314,47 @@ def available_mcp_tools(uid: str | None, *, reconnect: bool = False) -> dict[str
                 server["id"], server["name"], tool["name"], tool.get("inputSchema", {}),
             )
     if in_run():
-        emit("armory.discovery.list", component="mcp_runtime", data={"returned_count": len(result)})
+        trace_emit("armory.discovery.list", component="mcp_runtime", data={"returned_count": len(result)})
     return result
 
 
 def call_mcp_tool(uid: str, tool: McpTool, arguments: dict[str, Any]) -> dict[str, Any]:
-    from api.core.deps import get_repos
-    server = get_repos().mcp.get(uid, tool.server_id)
+    def trace_outcome(success: bool, reason: str) -> None:
+        if in_run():
+            trace_emit("tool.call.end", component="mcp_runtime",
+                       status="ok" if success else "denied",
+                       data={"tool_name": tool.remote_name, "success": success, "reason_code": reason})
+
+    server = deps.get_repos().mcp.get(uid, tool.server_id)
     conn = mcp_runtime.get(uid, tool.server_id)
-    if not server or not server["enabled"] or not conn or tool.remote_name not in {t["name"] for t in conn.tools}:
+    live_tool = next((item for item in conn.tools if item.get("name") == tool.remote_name), None) if conn else None
+    if not server or not server["enabled"] or not conn or not live_tool:
+        trace_outcome(False, "tool_unavailable")
         return {"success": False, "error": "MCP server is disconnected or tool is unavailable"}
-    result = conn.run(conn._call(tool.remote_name, arguments))
-    return {"success": not result.get("isError", False), **result}
+    schema = live_tool.get("inputSchema")
+    if not isinstance(schema, dict):
+        trace_outcome(False, "schema_unavailable")
+        return {"success": False, "error": "MCP tool schema is unavailable"}
+    required = schema.get("required", [])
+    if (not isinstance(required, list) or
+            any(not isinstance(name, str) or not name for name in required) or
+            len(required) != len(set(required))):
+        trace_outcome(False, "schema_invalid")
+        return {"success": False, "error": "MCP tool schema is invalid"}
+    missing = sorted(name for name in required if name not in arguments)
+    if missing:
+        trace_outcome(False, "arguments_missing")
+        return {"success": False, "error": "MCP arguments are missing required fields", "missing": missing}
+    if in_run():
+        trace_emit("tool.call.start", component="mcp_runtime",
+                   data={"tool_name": tool.remote_name, "arg_keys": list(arguments)})
+    try:
+        result = conn.run(conn._call(tool.remote_name, arguments))
+    except Exception as exc:
+        if in_run():
+            trace_emit("tool.call.error", component="mcp_runtime", status="error", error=exc,
+                       data={"tool_name": tool.remote_name, "reason_code": "mcp_call_failed"})
+        raise
+    success = not result.get("isError", False)
+    trace_outcome(success, "mcp_complete" if success else "mcp_error")
+    return {"success": success, **result}

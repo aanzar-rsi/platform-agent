@@ -8,9 +8,11 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import HTTPException
 
+from api.core.request_validation import RequestValidationError, validate_run_start_payload
 from api.core.deps import get_repos, user_from_token
 from api.core.security import utc_now_iso
 from api.services.chat_runtime_manager import get_runtime_manager
+from api.services.checkpoint_service import CheckpointService
 from api.ws import protocol as proto
 from src.utils.trace import bind, emit, reset
 
@@ -146,17 +148,29 @@ async def _handle_client_message(
         return
 
     if type_ == proto.CLIENT_RUN_START:
-        query = (payload.get("query") or "").strip()
-        if not query:
-            await _send_error("query required")
+        try:
+            req = validate_run_start_payload(
+                payload,
+                request_id=raw.get("id"),
+                uid=uid,
+                session_id=session_id,
+            )
+        except RequestValidationError as exc:
+            details = exc.payload.details or {}
+            detail_text = ", ".join(f"{key}={value}" for key, value in details.items())
+            msg = f"[{exc.payload.code}] {exc.payload.message}"
+            if detail_text:
+                msg = f"{msg} ({detail_text})"
+            await _send_error(msg)
             return
-        checkpoint_id = payload.get("checkpoint_id")
         result = mgr.start_run(
             agent_id=agent_id,
             owner_id=uid,
-            query=query,
-            checkpoint_id=checkpoint_id,
+            query=req.query,
+            checkpoint_id=req.checkpoint_id,
             session_id=session_id,
+            request_id=req.request_id,
+            query_type=req.query_type,
         )
         if not result.get("ok"):
             await _send_error(str(result.get("error") or "run_start_failed"))
@@ -188,8 +202,6 @@ async def _handle_client_message(
         if not checkpoint_id:
             await _send_error("checkpoint_id required")
             return
-        from api.services.checkpoint_service import CheckpointService
-
         try:
             CheckpointService(repos).set_rollback(agent_id, checkpoint_id)
         except HTTPException as exc:

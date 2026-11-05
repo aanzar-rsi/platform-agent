@@ -55,6 +55,7 @@ import { agentsAPI, filesAPI, preferencesAPI } from "@/lib/api";
 import { AgentWebSocketClient, createWebSocketClient } from "@/lib/websocket";
 import {
   AgentCardPayload,
+  ChildExecutionDetail,
   AgentTestCasePayload,
   AgentTestResultPayload,
   Message,
@@ -81,6 +82,8 @@ import {
   appendSubagentProgress,
   appendSubagentStarted,
   appendToolStarted,
+  finishChildReasoning,
+  finishReasoningStep,
   formatReadablePayload,
   stepsFromLegacyMetadata,
   updateChildFinished,
@@ -146,6 +149,21 @@ function formatNodeStatus(node: string): string {
   if (label.toLowerCase() === "agent") return "Thinking…";
   return `${label.charAt(0).toUpperCase()}${label.slice(1)}…`;
 }
+
+const PREFLIGHT_STATUS: Record<string, string> = {
+  checking: "Checking your request…",
+  access: "Checking your access…",
+  actions: "Finding available actions…",
+  context: "Preparing your request…",
+};
+
+const PREFLIGHT_OUTCOME: Record<string, string> = {
+  allow: "Access check complete. Continuing with your request.",
+  degrade: "Access check complete. Continuing with available information.",
+  clarify: "A little more information is needed to continue.",
+  retry: "Checking again in a moment…",
+  deny: "This request could not pass the access check.",
+};
 
 /** Ordered pipeline phases for AgentStudio — drives the header's live stepper. */
 const AGENT_STUDIO_PHASES: { key: string; label: string }[] = [
@@ -644,6 +662,31 @@ function SubagentConsole({ subagent }: { subagent: SubagentCallEvent }) {
             </pre>
           </div>
         )}
+
+        {subagent.executions && subagent.executions.length > 0 && (
+          <div className={(subagent.result ? "mt-3 border-t pt-3" : "mt-3")} style={{ borderColor: "var(--theme-border)" }}>
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500">Resource calls</div>
+            <div className="space-y-2">
+              {subagent.executions.map((call, idx) => (
+                <div key={idx} className="rounded-md border px-2.5 py-2" style={{ backgroundColor: "#f8f8f6", borderColor: "var(--theme-border)" }}>
+                  <div className="mb-1 text-[10px] font-semibold text-gray-700">
+                    {(call.resource_type || "resource").toUpperCase()}: {call.resource_name || "unknown"}
+                  </div>
+                  {call.arguments !== undefined && (
+                    <pre className="mb-1 whitespace-pre-wrap rounded border px-2 py-1 text-[10px]" style={{ backgroundColor: "#fffeff", borderColor: "var(--theme-border)" }}>
+                      {formatReadablePayload(call.arguments)}
+                    </pre>
+                  )}
+                  {call.result !== undefined && (
+                    <pre className="whitespace-pre-wrap rounded border px-2 py-1 text-[10px]" style={{ backgroundColor: "#fffeff", borderColor: "var(--theme-border)" }}>
+                      {formatReadablePayload(call.result)}
+                    </pre>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -833,7 +876,11 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
   const [liveCacheHit, setLiveCacheHit] = useState(false);
   const [liveTools, setLiveTools] = useState<ToolCallEvent[]>([]);
   const [liveSteps, setLiveSteps] = useState<AgentStep[]>([]);
+  const [activeLlmCalls, setActiveLlmCalls] = useState<Set<string>>(() => new Set());
   const [currentNode, setCurrentNode] = useState<string | null>(null);
+  const [preflightStatus, setPreflightStatus] = useState<string | null>(null);
+  const [preflightStages, setPreflightStages] = useState<string[]>([]);
+  const [preflightDecision, setPreflightDecision] = useState<string | null>(null);
   const [activeInFlightQuery, setActiveInFlightQuery] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
@@ -994,8 +1041,12 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
     setLiveTools([]);
     setLiveSteps([]);
     setCurrentNode(null);
+    setPreflightStatus(null);
+    setPreflightStages([]);
+    setPreflightDecision(null);
     setPendingInterrupt(null);
     setLiveCacheHit(false);
+    setActiveLlmCalls(new Set());
     streamingOutputRef.current = "";
     streamingReasoningRef.current = "";
     liveCacheHitRef.current = false;
@@ -1272,6 +1323,15 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
         onChildStep: (payload: { child_agent_id?: string; event: SubagentProgressEvent }) => {
           if (abort.signal.aborted || !payload.child_agent_id || !payload.event) return;
           appendChildProgress(liveStepsRef.current, payload.child_agent_id, payload.event);
+          const detail = (payload.event as any)?.detail as ChildExecutionDetail | undefined;
+          if (detail && typeof detail === "object" && (detail.resource_name || detail.resource_type)) {
+            const step = [...liveStepsRef.current].reverse().find(
+              (item) => item.type === "child_agent" && item.child.child_agent_id === payload.child_agent_id
+            );
+            if (step?.type === "child_agent") {
+              step.child.executions = [...(step.child.executions || []), detail];
+            }
+          }
           setLiveSteps([...liveStepsRef.current]);
         },
         onChildFinished: (payload: {
@@ -1375,7 +1435,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
           if (payload.execution_id) {
             activeExecutionIdRef.current = payload.execution_id;
           }
-          if (payload.run_active) {
+          if (payload.run_active || runActiveRef.current) {
             ignoreStaleRunEventsRef.current = false;
             setExecuting(true);
           } else {
@@ -1403,8 +1463,20 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
           lastUserQueryRef.current = payload.query;
           resetLiveState();
         },
+        onPreflightStatus: (payload) => {
+          if (ignoreStaleRunEventsRef.current) return;
+          const label = payload.stage === "done"
+            ? PREFLIGHT_OUTCOME[payload.decision ?? ""]
+            : PREFLIGHT_STATUS[payload.stage];
+          if (label && payload.stage !== "done") {
+            setPreflightStages((previous) => previous.includes(label) ? previous : [...previous, label]);
+          }
+          setPreflightStatus(payload.stage === "done" ? null : (label ?? null));
+          if (payload.stage === "done") setPreflightDecision(payload.decision ?? "deny");
+        },
         onNodeStarted: (payload) => {
           if (ignoreStaleRunEventsRef.current) return;
+          if (payload.node !== "preflight_node") setPreflightStatus(null);
           setCurrentNode(payload.node);
         },
         onNodeFinished: () => {
@@ -1442,10 +1514,36 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
           liveCacheHitRef.current = true;
           setLiveCacheHit(true);
         },
+        onLlmStarted: (payload) => {
+          if (ignoreStaleRunEventsRef.current || !payload.call_id) return;
+          setActiveLlmCalls((current) => new Set(current).add(payload.call_id));
+        },
+        onLlmDone: (payload) => {
+          if (ignoreStaleRunEventsRef.current) return;
+          setActiveLlmCalls((current) => {
+            const next = new Set(current);
+            next.delete(payload.call_id);
+            return next;
+          });
+          if (payload.child_agent_id) finishChildReasoning(liveStepsRef.current, payload.child_agent_id);
+          else finishReasoningStep(liveStepsRef.current);
+          setLiveSteps([...liveStepsRef.current]);
+        },
+        onLlmError: (payload) => {
+          if (ignoreStaleRunEventsRef.current) return;
+          setActiveLlmCalls((current) => {
+            const next = new Set(current);
+            next.delete(payload.call_id);
+            return next;
+          });
+          if (payload.child_agent_id) finishChildReasoning(liveStepsRef.current, payload.child_agent_id);
+          else finishReasoningStep(liveStepsRef.current);
+          setLiveSteps([...liveStepsRef.current]);
+        },
         onToolStarted: (payload) => {
           if (ignoreStaleRunEventsRef.current) return;
           const tool: ToolCallEvent = {
-            id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            id: payload.action_id || `tool_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
             tool_name: payload.tool_name,
             tool_args: payload.tool_args,
             task: payload.task,
@@ -1458,8 +1556,11 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
         },
         onToolFinished: (payload) => {
           if (ignoreStaleRunEventsRef.current) return;
+          const toolId = payload.action_id || [...liveToolsRef.current].reverse().find(
+            (tool) => tool.tool_name === payload.tool_name && tool.status === "running"
+          )?.id;
           liveToolsRef.current = liveToolsRef.current.map((t) =>
-            t.tool_name === payload.tool_name && t.status === "running"
+            toolId && t.id === toolId
               ? {
                   ...t,
                   tool_args: payload.tool_args ?? t.tool_args,
@@ -1477,14 +1578,14 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
             result: payload.result as string | undefined,
             success: payload.success,
             status: payload.success === false ? "error" : "done",
-          });
+          }, payload.action_id);
           setLiveSteps([...liveStepsRef.current]);
         },
         onSubagentStarted: (payload) => {
           if (ignoreStaleRunEventsRef.current) return;
           if (!payload.agent_name) return;
           const subagent: SubagentCallEvent = {
-            id: `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            id: payload.action_id || `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
             agent_name: payload.agent_name,
             task: payload.task,
             tool_args: payload.tool_args,
@@ -1510,7 +1611,7 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
             success: payload.success,
             status: payload.success === false ? "error" : "done",
             endedAt: Date.now(),
-          });
+          }, payload.action_id);
           setLiveSteps([...liveStepsRef.current]);
         },
         onChildStarted: (payload) => {
@@ -1531,6 +1632,15 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
           if (ignoreStaleRunEventsRef.current) return;
           if (!payload.child_agent_id || !payload.event) return;
           appendChildProgress(liveStepsRef.current, payload.child_agent_id, normalizeProgressEvent(payload.event));
+          const detail = (payload.event as any)?.detail as ChildExecutionDetail | undefined;
+          if (detail && typeof detail === "object" && (detail.resource_name || detail.resource_type)) {
+            const step = [...liveStepsRef.current].reverse().find(
+              (item) => item.type === "child_agent" && item.child.child_agent_id === payload.child_agent_id
+            );
+            if (step?.type === "child_agent") {
+              step.child.executions = [...(step.child.executions || []), detail];
+            }
+          }
           setLiveSteps([...liveStepsRef.current]);
         },
         onChildFinished: (payload) => {
@@ -2291,39 +2401,51 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
                   className="group/subagent w-full"
                 >
                   <div className="flex items-start w-full">
-                    <StepBranchTarget
-                      checkpointId={showBranchActions ? stepCheckpointId : undefined}
-                      selected={stepSelected}
-                      onSelect={() => toggleStepBranch(scopeId, index, stepCheckpointId)}
-                      className="flex-1 min-w-0"
-                    >
-                      <div className="flex items-center gap-2 py-1.5 text-xs">
-                        <span
-                          className={`h-2 w-2 shrink-0 rounded-full ${subagentStatusDotClass(subagent)}`}
-                          aria-hidden
-                        />
-                        <Sparkles
-                          className="h-3.5 w-3.5 shrink-0 opacity-60"
-                          style={{ color: "var(--theme-accent)" }}
-                        />
-                        <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
-                        {showAgentName && (
-                          <span className="text-[10px] opacity-45 shrink-0">{subagent.agent_name}</span>
-                        )}
-                      </div>
-                    </StepBranchTarget>
                     <CollapsibleTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          "flex-1 min-w-0 rounded-md text-left transition-colors hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--theme-accent)]",
+                          stepSelected && "ring-1 ring-[var(--theme-accent)]/40"
+                        )}
+                      >
+                        <div className="flex items-center gap-2 py-1.5 text-xs">
+                          <span
+                            className={`h-2 w-2 shrink-0 rounded-full ${subagentStatusDotClass(subagent)}`}
+                            aria-hidden
+                          />
+                          <Sparkles
+                            className="h-3.5 w-3.5 shrink-0 opacity-60"
+                            style={{ color: "var(--theme-accent)" }}
+                          />
+                          <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
+                          {showAgentName && (
+                            <span className="text-[10px] opacity-45 shrink-0">{subagent.agent_name}</span>
+                          )}
+                        </div>
+                      </button>
+                    </CollapsibleTrigger>
+                    {showBranchActions && (
                       <Button
                         type="button"
                         variant="ghost"
                         size="icon"
-                        className="h-7 w-7 shrink-0 opacity-50 hover:opacity-100"
-                        title="Show sub-agent details"
+                        className={cn(
+                          "mt-1 ml-1 h-5 w-5 shrink-0 rounded-md opacity-60 hover:opacity-100",
+                          stepSelected && "bg-neutral-200/80 opacity-100"
+                        )}
+                        title="Fork / rewind from here"
+                        aria-label="Fork / rewind from here"
+                        disabled={!stepCheckpointId}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          toggleStepBranch(scopeId, index, stepCheckpointId);
+                        }}
                       >
-                        <ChevronRight className="h-3 w-3 group-data-[state=open]/subagent:hidden" />
-                        <ChevronDown className="h-3 w-3 hidden group-data-[state=open]/subagent:inline" />
+                        <GitBranch className="h-3 w-3" />
                       </Button>
-                    </CollapsibleTrigger>
+                    )}
                   </div>
                   <CollapsibleContent>
                     <div className="pb-2 pt-1">
@@ -2342,27 +2464,56 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
             const taskLabel = subagent.task?.trim() || `Child: ${subagent.child_agent_id || subagent.agent_name}`;
             return (
               <Fragment key={`${subagent.id || "child"}-${index}`}>
-                <Collapsible defaultOpen className="group/subagent w-full">
+                <Collapsible defaultOpen={false} className="group/child-agent w-full">
                   <div className="flex items-start w-full">
-                    <StepBranchTarget
-                      checkpointId={showBranchActions ? stepCheckpointId : undefined}
-                      selected={stepSelected}
-                      onSelect={() => toggleStepBranch(scopeId, index, stepCheckpointId)}
-                      className="flex-1 min-w-0"
-                    >
-                      <div className="flex items-center gap-2 py-1.5 text-xs">
-                        <span className={`h-2 w-2 shrink-0 rounded-full ${subagentStatusDotClass(subagent)}`} aria-hidden />
-                        <Sparkles className="h-3.5 w-3.5 shrink-0 opacity-60" style={{ color: "var(--theme-accent)" }} />
-                        <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
-                        <span className="text-[10px] opacity-45 shrink-0">{subagent.child_agent_id || subagent.agent_name}</span>
-                      </div>
-                    </StepBranchTarget>
                     <CollapsibleTrigger asChild>
-                      <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0 opacity-50 hover:opacity-100" title="Show child details">
-                        <ChevronRight className="h-3 w-3 group-data-[state=open]/subagent:hidden" />
-                        <ChevronDown className="h-3 w-3 hidden group-data-[state=open]/subagent:inline" />
-                      </Button>
+                      <button
+                        type="button"
+                        className={cn(
+                          "flex-1 min-w-0 rounded-lg text-left transition-colors hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--theme-accent)]",
+                          stepSelected && "ring-1 ring-[var(--theme-accent)]/40"
+                        )}
+                      >
+                        <div
+                          className="min-h-20 rounded-lg border-2 px-3 py-2.5"
+                          style={{
+                            borderColor: "rgba(251, 226, 50, 0.85)",
+                            backgroundColor: "rgba(251, 226, 50, 0.16)",
+                          }}
+                        >
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${subagentStatusDotClass(subagent)}`} aria-hidden />
+                            <Sparkles className="h-3.5 w-3.5 shrink-0 opacity-70" style={{ color: "var(--theme-accent)" }} />
+                            <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
+                            <span className="text-[10px] opacity-55 shrink-0">{subagent.child_agent_id || subagent.agent_name}</span>
+                          </div>
+                          <p className="mt-2 text-[11px] font-semibold tracking-wide text-gray-700">
+                            Click to see child agent execution
+                          </p>
+                        </div>
+                      </button>
                     </CollapsibleTrigger>
+                    {showBranchActions && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className={cn(
+                          "mt-1 ml-1 h-5 w-5 shrink-0 rounded-md opacity-60 hover:opacity-100",
+                          stepSelected && "bg-neutral-200/80 opacity-100"
+                        )}
+                        title="Fork / rewind from here"
+                        aria-label="Fork / rewind from here"
+                        disabled={!stepCheckpointId}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          toggleStepBranch(scopeId, index, stepCheckpointId);
+                        }}
+                      >
+                        <GitBranch className="h-3 w-3" />
+                      </Button>
+                    )}
                   </div>
                   <CollapsibleContent>
                     <div className="pb-2 pt-1">
@@ -2377,42 +2528,56 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
 
           const { tool } = step;
           if (!tool) return null;
-          const taskLabel = tool.task?.trim() || tool.tool_name;
-          const showToolName = Boolean(tool.task?.trim() && tool.task.trim() !== tool.tool_name);
+          const resourceName = tool.tool_name || (tool as ToolCallEvent & { name?: string }).name || "Unknown resource";
+          const taskLabel = tool.task?.trim() || resourceName;
+          const showResourceName = Boolean(tool.task?.trim() && tool.task.trim() !== resourceName);
           return (
             <Fragment key={`${tool.id || "tool"}-${index}`}>
               <Collapsible defaultOpen={false} className="group/tool w-full">
                 <div className="flex items-start w-full">
-                  <StepBranchTarget
-                    checkpointId={showBranchActions ? stepCheckpointId : undefined}
-                    selected={stepSelected}
-                    onSelect={() => toggleStepBranch(scopeId, index, stepCheckpointId)}
-                    className="flex-1 min-w-0"
-                  >
-                    <div className="flex items-center gap-2 py-1.5 text-xs">
-                      <span
-                        className={`h-2 w-2 shrink-0 rounded-full ${toolStatusDotClass(tool)}`}
-                        aria-hidden
-                      />
-                      <Wrench className="h-3.5 w-3.5 shrink-0 opacity-60" style={{ color: "var(--theme-accent)" }} />
-                      <span className="font-medium truncate flex-1 text-left">{taskLabel}</span>
-                      {showToolName && (
-                        <span className="text-[10px] opacity-45 shrink-0">{tool.tool_name}</span>
-                      )}
-                    </div>
-                  </StepBranchTarget>
                   <CollapsibleTrigger asChild>
+                    <button
+                      type="button"
+                      className={cn(
+                        "flex-1 min-w-0 rounded-md text-left transition-colors hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--theme-accent)]",
+                        stepSelected && "ring-1 ring-[var(--theme-accent)]/40"
+                      )}
+                    >
+                      <div className="flex items-center gap-2 py-1.5 text-xs">
+                        <span
+                          className={`h-2 w-2 shrink-0 rounded-full ${toolStatusDotClass(tool)}`}
+                          aria-hidden
+                        />
+                        <Wrench className="h-3.5 w-3.5 shrink-0 opacity-60" style={{ color: "var(--theme-accent)" }} />
+                          <span className="font-medium min-w-0 flex-1 break-words text-left">{taskLabel}</span>
+                          <span className="shrink-0 text-right text-[10px] leading-tight opacity-55">
+                            {showResourceName && <span className="block font-medium">{resourceName}</span>}
+                            <span className="block font-mono">{tool.id || "No call ID"}</span>
+                          </span>
+                      </div>
+                    </button>
+                  </CollapsibleTrigger>
+                  {showBranchActions && (
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="h-7 w-7 shrink-0 opacity-50 hover:opacity-100"
-                      title="Show tool details"
+                      className={cn(
+                        "mt-1 ml-1 h-5 w-5 shrink-0 rounded-md opacity-60 hover:opacity-100",
+                        stepSelected && "bg-neutral-200/80 opacity-100"
+                      )}
+                      title="Fork / rewind from here"
+                      aria-label="Fork / rewind from here"
+                      disabled={!stepCheckpointId}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        toggleStepBranch(scopeId, index, stepCheckpointId);
+                      }}
                     >
-                      <ChevronRight className="h-3 w-3 group-data-[state=open]/tool:hidden" />
-                      <ChevronDown className="h-3 w-3 hidden group-data-[state=open]/tool:inline" />
+                      <GitBranch className="h-3 w-3" />
                     </Button>
-                  </CollapsibleTrigger>
+                  )}
                 </div>
                 <CollapsibleContent>
                   <div className="pl-6 pb-2 pt-1">
@@ -2715,12 +2880,49 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
                           }}
                         >
                       {renderAgentConversation(liveSteps, undefined, { scopeId: "live" })}
+                      {(preflightStatus || preflightStages.length > 0) && !streamingOutput && (
+                        <div className="mb-3 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3" aria-label="Pre-flight progress" aria-live="polite">
+                          <div className="flex items-center gap-2 text-sm font-semibold">
+                            {preflightStatus ? (
+                              <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                            ) : (
+                              <ShieldCheck className="h-4 w-4 shrink-0" aria-hidden />
+                            )}
+                            <span>{preflightStatus ? "Running pre-flight" : "Pre-flight complete"}</span>
+                          </div>
+                          <div className="mt-2 space-y-2 border-l border-neutral-300 pl-3 text-sm">
+                            {preflightStages.map((label) => {
+                              const active = label === preflightStatus;
+                              return (
+                                <div key={label} className="flex items-center gap-2">
+                                  {active ? (
+                                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                                  ) : (
+                                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
+                                  )}
+                                  <span className={active ? "font-medium" : "text-neutral-600"}>{label}</span>
+                                </div>
+                              );
+                            })}
+                            {preflightDecision && (
+                              <div className="flex items-center gap-2 font-medium">
+                                {preflightDecision === "deny" ? (
+                                  <XCircle className="h-4 w-4 shrink-0 text-red-600" aria-hidden />
+                                ) : (
+                                  <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
+                                )}
+                                <span>{PREFLIGHT_OUTCOME[preflightDecision]}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
                       {liveCacheHit && (
                         <div className="mb-2">
                           <CacheHitBadge />
                         </div>
                       )}
-                      {streamingOutput ? (
+                      {streamingOutput && (
                         <div className={MARKDOWN_BUBBLE_CLASS}>
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm]}
@@ -2728,19 +2930,18 @@ const EnhancedChatView = forwardRef<EnhancedChatViewHandle, ChatViewProps>(funct
                           >
                             {stabilizeMarkdownLinks(streamingOutput)}
                           </ReactMarkdown>
-                          {isLoading && (
-                            <span className="inline-block w-2 h-4 ml-1 bg-brand animate-pulse" />
-                          )}
                         </div>
-                      ) : (
-                        !liveSteps.length &&
-                        !pendingInterrupt && (
+                      )}
+                      {!pendingInterrupt &&
+                        !preflightStatus &&
+                        (preflightDecision !== null || preflightStages.length === 0) &&
+                        (activeLlmCalls.size > 0 || (!streamingOutput && !liveSteps.length && isLoading)) && (
                           <div className="flex items-center gap-3 text-sm opacity-70">
                             <CustomLoader className="custom-loader--inline" />
                             {currentNode ? formatNodeStatus(currentNode) : "Thinking…"}
                           </div>
                         )
-                      )}
+                      }
                       {pendingInterrupt && (
                         <InterruptPrompt
                           embedded

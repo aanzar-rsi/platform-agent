@@ -45,6 +45,20 @@ class ChatRuntime:
     flush_execution_ids: dict[int, str | None] = field(default_factory=dict)
 
 
+def _is_affirmative_resume(value: Any) -> bool:
+    text = ""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, dict):
+        for key in ("answer", "text", "note", "message", "value"):
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                text = candidate
+                break
+    normalized = text.strip().lower()
+    return normalized in {"yes", "y", "continue", "ok", "okay", "affirmative"}
+
+
 class ChatRuntimeManager:
     """Process-local orchestrator for runs + DB-backed websocket replay/live delivery."""
 
@@ -215,6 +229,8 @@ class ChatRuntimeManager:
         query: str,
         checkpoint_id: str | None = None,
         session_id: str | None = None,
+        request_id: str | None = None,
+        query_type: str = "chat",
     ) -> dict[str, Any]:
         doc = get_repos().sessions.get(agent_id)
         if not doc or doc["deleted"] or doc["owner_id"] != owner_id:
@@ -237,6 +253,8 @@ class ChatRuntimeManager:
                 query=query,
                 checkpoint_id=checkpoint_id,
                 session_id=session_id,
+                request_id=request_id,
+                query_type=query_type,
             )
 
         self._agent.request_stop(agent_id, superseded=True)
@@ -261,6 +279,8 @@ class ChatRuntimeManager:
                     query=query,
                     checkpoint_id=checkpoint_id,
                     session_id=session_id,
+                    request_id=request_id,
+                    query_type=query_type,
                 )
                 if not result.get("ok"):
                     self.enqueue_control(agent_id, "error", {"message": result["error"]})
@@ -279,6 +299,8 @@ class ChatRuntimeManager:
         query: str,
         checkpoint_id: str | None,
         session_id: str | None = None,
+        request_id: str | None = None,
+        query_type: str = "chat",
     ) -> dict[str, Any]:
         rt = self.get_or_create(agent_id, owner_id)
         try:
@@ -294,6 +316,8 @@ class ChatRuntimeManager:
                 query=query,
                 checkpoint_id=checkpoint_id,
                 session_id=session_id,
+                request_id=request_id,
+                query_type=query_type,
             )
         except Exception:
             with self._lock:
@@ -310,6 +334,8 @@ class ChatRuntimeManager:
         query: str,
         checkpoint_id: str | None,
         session_id: str | None,
+        request_id: str | None,
+        query_type: str,
     ) -> dict[str, Any]:
         repos = get_repos()
         session = repos.sessions.get(agent_id)
@@ -340,6 +366,8 @@ class ChatRuntimeManager:
             "policy": agent.policy.as_dict(),
             "policy_version": agent.policy.version,
             "session_id": agent.id.latest_session_id,
+            "request_id": request_id,
+            "query_type": query_type,
         }
         runtime.update({key: value for key, value in context().items() if value})
         if checkpoint_id is None and session:
@@ -486,6 +514,7 @@ class ChatRuntimeManager:
             "policy": agent.policy.as_dict(),
             "policy_version": agent.policy.version,
             "session_id": agent.id.latest_session_id,
+            "preflight_idle_confirmed": _is_affirmative_resume(resume_value),
         }
         runtime.update({key: value for key, value in context().items() if value})
 

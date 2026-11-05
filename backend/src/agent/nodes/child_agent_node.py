@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage
-
 from src.agent.agent_core import AgentCore, Policy, child_runner
-from src.agent.memory import record_execution
+from src.agent.nodes.output_security_gate import sanitize_executor_output
+from src.agent.nodes.result_collector import branch_result
+from src.agent.preflight import repository as preflight_repository
+from src.agent.preflight.authorization import authorize_child_task, verify_parent_spawn
 
 
 def _requested_policy(raw: dict | None) -> Policy | None:
@@ -28,6 +29,10 @@ def _root_owner(repository, record: dict) -> str:
 
 def child_agent_node(state: dict, config=None) -> dict:
     values = (config or {}).get("configurable") or {}
+    try:
+        scope = verify_parent_spawn(state.get("planner_context") or {}, config or {})
+    except Exception:
+        return _record_failure(state, "Child execution is not approved by Preflight.")
     parent_id = values.get("agent_id")
     parent_execution_id = values.get("execution_id")
     if not parent_id or not parent_execution_id:
@@ -45,14 +50,26 @@ def child_agent_node(state: dict, config=None) -> dict:
         return _record_failure(state, "Parent agent is not running.")
 
     parent = AgentCore(parent_record, repository, active_execution_id=parent_execution_id)
+    trusted_identity = (state.get("planner_context") or {}).get("identity") or {}
+    try:
+        tenant_id = trusted_identity["tenant_id"]
+        tenant = preflight_repository.get_tenant_record(tenant_id)
+        if not tenant or tenant.get("status") != "active":
+            raise PermissionError("tenant_unavailable")
+        identity = {
+            "tenant_id": tenant_id,
+            "permissions": preflight_repository.get_active_permission_codes(
+                trusted_identity["role_id"], trusted_identity["tenant_id"]
+            ),
+            "tenant_policy": tenant["policy"],
+        }
+    except Exception:
+        return _record_failure(state, "Child authorization is unavailable.")
     uid = values.get("owner_id")
     preloaded_context = dict(state.get("preloaded_context") or {})
     if uid and "uid" not in preloaded_context:
         preloaded_context["uid"] = uid
 
-    execution_history = list(state.get("execution_history") or [])
-    execution_memory = dict(state.get("execution_memory") or {})
-    context_memory = state.get("context_memory")
     calls = (state.get("next_step") or {}).get("child_calls") or []
     if not isinstance(calls, list):
         calls = []
@@ -71,11 +88,17 @@ def child_agent_node(state: dict, config=None) -> dict:
         parameters = call.get("parameters") if isinstance(call.get("parameters"), dict) else {}
         requested_policy = _requested_policy(call.get("requested_policy"))
 
-        child_context = {**preloaded_context, "parameters": parameters}
         child_task = task
         if parameters:
             child_task += f"\nParameters: {parameters}"
         try:
+            scope = verify_parent_spawn(state.get("planner_context") or {}, config or {})
+            authorize_child_task(child_task, scope, identity, config or {})
+            child_context = {
+                **preloaded_context, "parameters": parameters,
+                "runtime": {"parent_business_permissions": scope,
+                            "parent_policy_version": values.get("policy_version")},
+            }
             handle = child_runner.spawn_child(parent, child_task, child_runner.run_child_graph, child_context,
                                               requested_policy=requested_policy)
             started += 1
@@ -105,46 +128,30 @@ def child_agent_node(state: dict, config=None) -> dict:
             "task": (state.get("next_step") or {}).get("task") or "Spawn child agents",
             "status": "failed", "success": False,
         }]
-    for entry in spawned:
-        step_key = f"child_agent_{len(execution_history) + 1}"
-        value = {"summary": summary, "child_agent_id": entry.get("child_agent_id"),
-                 "status": entry["status"]}
-        execution_memory, context_memory, stored = record_execution(
-            execution_memory, context_memory, key=step_key, value=value,
-            description=entry.get("task") or "Child-agent spawn result",
-            entry_type="child_agent", name="child_agent", task=entry.get("task") or "",
-            success=entry["success"], metadata={k: v for k, v in entry.items() if k not in {"type", "result"}},
-        )
-        entry.update(stored)
-        execution_history.append(entry)
-
-    return {
-        "messages": [
-            AIMessage(
-                content=summary,
-                additional_kwargs={"ui_hidden": True},
-            )
-        ],
-        "execution_history": execution_history,
-        "execution_memory": execution_memory,
-        "context_memory": context_memory,
-    }
+    return _envelope(state, [{
+        "kind": "child_spawn",
+        "value": {"summary": summary, "child_agent_id": entry.get("child_agent_id"),
+                  "status": entry["status"]},
+        "success": entry["success"], "status": entry["status"], "name": "child_agent",
+        "task": entry.get("task") or "Spawn child agents",
+        "description": entry.get("task") or "Child-agent spawn result",
+        "metadata": {"child_agent_id": entry.get("child_agent_id"),
+                     "tool_args": entry.get("tool_args") or {},
+                     "requested_policy": entry.get("requested_policy")},
+    } for entry in spawned])
 
 
 def _record_failure(state: dict, message: str) -> dict:
-    history = list(state.get("execution_history") or [])
-    key = f"child_agent_{len(history) + 1}"
     task = (state.get("next_step") or {}).get("task") or "Spawn child agents"
-    memory, context, entry = record_execution(
-        state.get("execution_memory"), state.get("context_memory"), key=key,
-        value={"success": False, "error": message}, description=task,
-        entry_type="child_agent", name="child_agent", task=task, success=False,
-        metadata={"status": "failed"},
-    )
-    history.append(entry)
-    return {
-        "messages": [AIMessage(content=message, additional_kwargs={"ui_hidden": True})],
-        "execution_history": history,
-        "execution_memory": memory,
-        "context_memory": context,
-    }
+    return _envelope(state, [{"kind": "child_spawn", "value": {"error": message},
+                              "success": False, "status": "failed", "name": "child_agent",
+                              "task": task, "description": task, "metadata": {}}])
+
+
+def _envelope(state: dict, results: list[dict]) -> dict:
+    next_step = state.get("next_step") or {}
+    envelope = sanitize_executor_output({
+        "version": 1, "action_id": next_step.get("action_id"),
+        "source": "child_agent", "results": results,
+    })
+    return branch_result(state, envelope)

@@ -193,6 +193,7 @@ def agentnode_prompt_loader(
     execution_history: list[dict[str, Any]],
     execution_memory_index: list[dict[str, Any]],
     context_memory: dict[str, Any],
+    context_selection_summary: dict[str, Any] | None = None,
     *,
     conversation: str = "",
     current_task: str = "",
@@ -239,6 +240,7 @@ def agentnode_prompt_loader(
         "execution_history": execution_history,
         "execution_memory_index": execution_memory_index,
         "context_memory": context_memory,
+        "context_selection_summary": context_selection_summary or {},
         "preloaded_context": preloaded,
     }
     return load_prompt("agentnode", context)
@@ -272,11 +274,17 @@ def fast_agent_prompt_loader(
     tools: list,
     subagents: list | None = None,
     conversation: str = "",
+    learned_experiences: str = "(none)",
+    planner_context: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
+    """Render the lightweight classifier with governed planner context."""
+
     context = {
         "persona": _load_module("persona"),
         "user_query": user_query,
         "conversation": conversation,
+        "learned_experiences": learned_experiences,
+        "planner_context": planner_context or {},
     }
     return load_prompt("fast_agent", context)
 
@@ -289,12 +297,17 @@ def planner_agent_prompt_loader(
     execution_history: list[dict[str, Any]],
     execution_memory_index: list[dict[str, Any]],
     context_memory: dict[str, Any],
+    context_selection_summary: dict[str, Any] | None = None,
     conversation: str = "",
     current_task: str = "",
     max_plan_steps: int = 8,
     child_mode: bool = False,
     planner_error: dict[str, Any] | None = None,
+    learned_experiences: str = "(none)",
+    planner_context: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
+    """Render the full planner with governed Preflight context."""
+
     context = {
         "persona": _load_module("persona"),
         "constraints": _load_module("constraints"),
@@ -304,9 +317,12 @@ def planner_agent_prompt_loader(
         "execution_history": execution_history,
         "execution_memory_index": execution_memory_index,
         "context_memory": context_memory,
+        "context_selection_summary": context_selection_summary or {},
         "armory": _armory_text(tools=tools, subagents=subagents),
         "max_plan_steps": max(1, int(max_plan_steps or 1)),
         "child_mode": child_mode,
         "planner_error": planner_error or {},
+        "learned_experiences": learned_experiences,
+        "planner_context": planner_context or {},
     }
     return load_prompt("planner_agent", context)

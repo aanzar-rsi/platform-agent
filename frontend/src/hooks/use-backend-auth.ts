@@ -1,6 +1,6 @@
 // Real backend authentication (JWT / client2.0)
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { authAPI, setAccessToken, getAccessToken, clearAuthStorage } from '@/lib/api';
+import { authAPI, healthAPI, setAccessToken, getAccessToken, clearAuthStorage } from '@/lib/api';
 import { User } from '@/types/backend';
 import { toast } from 'sonner';
 
@@ -12,6 +12,8 @@ interface AuthState {
   isLoading: boolean;
   isAuthenticated: boolean;
   currentSessionId: string | null;
+  backendAvailable: boolean;
+  backendWarning: string | null;
 }
 
 type SignInResult = { success: boolean; message: string };
@@ -38,6 +40,9 @@ function toUser(u: {
 }
 
 function extractError(error: any): string {
+  if (!error?.response) {
+    return 'Backend unavailable. Start the API and check PostgreSQL connectivity.';
+  }
   const data = error?.response?.data;
   if (!data) return error?.message || 'Request failed';
   if (typeof data === 'string') return data;
@@ -53,15 +58,39 @@ export function useBackendAuth() {
     isLoading: true,
     isAuthenticated: false,
     currentSessionId: null,
+    backendAvailable: true,
+    backendWarning: null,
   });
   const bootstrapRunRef = useRef(0);
   const signInFlightRef = useRef<Promise<SignInResult> | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    healthAPI.live()
+      .then((live) => {
+        if (cancelled) return;
+        const available = Boolean(live?.dependencies?.postgres);
+        const warning = available ? null : 'PostgreSQL is unavailable; backend is running in degraded mode.';
+        setState((prev) => ({ ...prev, backendAvailable: available, backendWarning: warning }));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setState((prev) => ({
+          ...prev,
+          backendAvailable: false,
+          backendWarning: 'Backend is unreachable. Start backend service and verify dependencies.',
+        }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const run = ++bootstrapRunRef.current;
     const token = getAccessToken();
     if (!token) {
-      setState({ user: null, isLoading: false, isAuthenticated: false, currentSessionId: null });
+      setState((prev) => ({ ...prev, user: null, isLoading: false, isAuthenticated: false, currentSessionId: null }));
       return;
     }
 
@@ -70,25 +99,34 @@ export function useBackendAuth() {
         if (bootstrapRunRef.current !== run) return;
         const user = toUser(response);
         localStorage.setItem(USER_KEY, JSON.stringify(user));
-        setState({
+        setState((prev) => ({
+          ...prev,
           user,
           isLoading: false,
           isAuthenticated: true,
           currentSessionId: localStorage.getItem(AUTH_SESSION_KEY),
-        });
+        }));
       })
       .catch((error: unknown) => {
         if (bootstrapRunRef.current !== run) return;
         const status = (error as { response?: { status?: number } })?.response?.status;
         if (status === 401 || status === 403) clearAuthStorage();
-        setState({ user: null, isLoading: false, isAuthenticated: false, currentSessionId: null });
+        setState((prev) => ({
+          ...prev,
+          user: null,
+          isLoading: false,
+          isAuthenticated: false,
+          currentSessionId: null,
+          backendAvailable: Boolean(status),
+          backendWarning: status ? prev.backendWarning : 'Backend is unreachable. Start backend service and verify dependencies.',
+        }));
       });
   }, []);
 
   useEffect(() => {
     const handleUnauthorized = () => {
       bootstrapRunRef.current += 1;
-      setState({ user: null, isLoading: false, isAuthenticated: false, currentSessionId: null });
+      setState((prev) => ({ ...prev, user: null, isLoading: false, isAuthenticated: false, currentSessionId: null }));
     };
 
     window.addEventListener('eva:unauthorized', handleUnauthorized);
@@ -129,12 +167,15 @@ export function useBackendAuth() {
             localStorage.setItem(AUTH_SESSION_KEY, response.session_id);
           }
 
-          setState({
+          setState((prev) => ({
+            ...prev,
             user,
             isLoading: false,
             isAuthenticated: true,
             currentSessionId: response.session_id || null,
-          });
+            backendAvailable: true,
+            backendWarning: null,
+          }));
 
           toast.success('Signed in successfully');
           return { success: true, message: 'logged in' };
@@ -142,6 +183,11 @@ export function useBackendAuth() {
           console.error('Sign in error:', error);
           const errorMessage = extractError(error);
           toast.error(errorMessage);
+          setState((prev) => ({
+            ...prev,
+            backendAvailable: Boolean(error?.response),
+            backendWarning: error?.response ? prev.backendWarning : 'Backend is unreachable. Start backend service and verify dependencies.',
+          }));
           return { success: false, message: errorMessage };
         }
       })();
@@ -169,12 +215,13 @@ export function useBackendAuth() {
       console.error('Sign out error:', error);
     } finally {
       clearAuthStorage();
-      setState({
+      setState((prev) => ({
+        ...prev,
         user: null,
         isLoading: false,
         isAuthenticated: false,
         currentSessionId: null,
-      });
+      }));
       toast.success('Signed out successfully');
     }
   }, []);
@@ -190,6 +237,8 @@ export function useBackendAuth() {
     isLoading: state.isLoading,
     isAuthenticated: state.isAuthenticated,
     currentSessionId: state.currentSessionId,
+    backendAvailable: state.backendAvailable,
+    backendWarning: state.backendWarning,
     signIn,
     signOut,
     setCurrentSessionId,

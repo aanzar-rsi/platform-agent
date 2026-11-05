@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from src.subagents.learner_agent.config import EXPERIENCE_ENABLED, TOP_K
-from src.subagents.learner_agent.keys import build_embed_text
+from src.subagents.learner_agent.keys import build_decision_state, build_embed_text, build_retrieval_queries
 from src.agent import kb
 from src.agent.policy_schema import effective_memory_policy, memory_action_allowed
 
@@ -18,6 +18,8 @@ def retrieve_experiences(
     *,
     prior_task: str = "",
     prior_tool: str = "",
+    execution_history: list[dict[str, Any]] | None = None,
+    available_resources: set[tuple[str, str]] | None = None,
     uid: str | None = None,
     top_k: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -47,12 +49,17 @@ def retrieve_experiences(
             policy = {**memory_policy, "version": agent.policy.version}
         else:
             policy = {"read": ["USER", "AGENT"], "write": ["USER"], "tenant_id": None}
-        key = build_embed_text(
-            user_query,
-            prior_task=prior_task or "",
-            prior_tool=prior_tool or "",
-        )
-        return kb.search(uid or "", policy, key, top_k=top_k if top_k is not None else TOP_K)
+        decision = build_decision_state(user_query, execution_history)
+        key = (build_retrieval_queries(decision)[1] if execution_history else build_embed_text(
+            user_query, prior_task=prior_task or "", prior_tool=prior_tool or ""))
+        chunks = kb.search(uid or "", policy, key, top_k=top_k if top_k is not None else TOP_K)
+        if available_resources is None:
+            return chunks
+        return [chunk for chunk in chunks if not (
+            (resource := (chunk.get("metadata") or {}).get("resource_name"))
+            and (str((chunk.get("metadata") or {}).get("resource_type") or "tool"), str(resource))
+            not in available_resources
+        )]
     except Exception as exc:
         from src.utils.trace import in_run, emit
 
@@ -70,6 +77,7 @@ def format_experiences_for_prompt(chunks: list[dict[str, Any]]) -> str:
     for i, chunk in enumerate(chunks, start=1):
         advice = (chunk.get("content") or chunk.get("advice") or "").strip()
         meta = chunk.get("metadata") or {}
+        category = str(chunk.get("chunk_type") or "workflow").replace("_", " ").title()
         outcome = meta.get("outcome") or ""
         tool = meta.get("observed_tool") or ""
         score = chunk.get("score")
@@ -81,5 +89,5 @@ def format_experiences_for_prompt(chunks: list[dict[str, Any]]) -> str:
             header += "]"
         if isinstance(score, (int, float)):
             header += f" (sim={score:.3f})"
-        lines.append(f"{header}\n{advice}")
+        lines.append(f"{header} {category}:\n{advice}")
     return "\n\n".join(lines)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import uuid
@@ -29,8 +30,6 @@ def get_agent_app():
         if _agent_app is not None:
             return _agent_app
         ensure_client_path()
-        import os
-
         os.environ["EVA_SKIP_VENV_REEXEC"] = "1"
         from src.agent.graph import agent_app
 
@@ -99,6 +98,36 @@ class AgentRuntime:
         from src.utils.trace import emit as trace_emit
 
         run_started_at = time.monotonic()
+        previous_step_at = run_started_at
+        timing_steps: list[dict[str, Any]] = []
+
+        def record_timing(stage: str, duration_ms: float, *, node: str | None = None,
+                          reason_code: str | None = None) -> None:
+            step = {"stage": stage, "duration_ms": round(duration_ms, 2)}
+            if node:
+                step["node"] = node
+            timing_steps.append(step)
+            trace_emit("run.timing.step", component="agent_runtime", duration_ms=duration_ms,
+                       agent_id=agent_id, execution_id=execution_id, owner_id=owner_id,
+                       data={"stage": stage, "node": node, "reason_code": reason_code})
+
+        def summarize_timing() -> None:
+            if previous_step_at < time.monotonic():
+                record_timing("runtime.finalize", (time.monotonic() - previous_step_at) * 1000)
+            elapsed_ms = (time.monotonic() - run_started_at) * 1000
+            totals: dict[str, float] = {}
+            for step in timing_steps:
+                totals[step["stage"]] = totals.get(step["stage"], 0) + step["duration_ms"]
+            summary = {
+                "elapsed_ms": round(elapsed_ms, 2), "step_count": len(timing_steps),
+                "stage_totals_ms": {stage: round(duration, 2) for stage, duration in totals.items()},
+                "slowest_steps": sorted(timing_steps, key=lambda step: step["duration_ms"], reverse=True)[:5],
+                "unattributed_ms": round(max(0, elapsed_ms - sum(totals.values())), 2),
+            }
+            trace_emit("run.timing.summary", component="agent_runtime", duration_ms=elapsed_ms,
+                       agent_id=agent_id, execution_id=execution_id, owner_id=owner_id, data=summary)
+            logger.info("Run timing agent_id=%s execution_id=%s summary=%s", agent_id, execution_id, summary)
+
         cancel = self._flag_for(agent_id)
         execution_id = execution_id or str(uuid.uuid4())
         if (runtime or {}).get("agent_id"):
@@ -118,7 +147,7 @@ class AgentRuntime:
         # Immediate UI signal — LangGraph only emits node.started after the node
         # finishes, which left the client stuck on "Thinking…" during checkpoint
         # load / prompt prep / first LLM tokens.
-        event_writer.enqueue("node.started", {"node": "agent_node"})
+        event_writer.enqueue("preflight.status", {"stage": "checking"})
 
         try:
             from src.agent.subagent_stream import (
@@ -129,8 +158,10 @@ class AgentRuntime:
             )
             from src.agent.token_stream import (
                 reset_cache_hit_callback,
+                reset_lifecycle_callback,
                 reset_token_callback,
                 set_cache_hit_callback,
+                set_lifecycle_callback,
                 set_token_callback,
             )
             from src.utils.agent_logger import log_event
@@ -177,6 +208,10 @@ class AgentRuntime:
                 if cancel.is_set():
                     return
                 event_writer.enqueue("llm.cache_hit", payload)
+
+            def on_lifecycle(event: str, payload: dict[str, Any]) -> None:
+                if not cancel.is_set():
+                    event_writer.enqueue(event, payload)
 
             def on_child_event(agent_name: str, event: dict) -> None:
                 if cancel.is_set():
@@ -226,10 +261,13 @@ class AgentRuntime:
 
             token = set_token_callback(on_token)
             cache_hit_token = set_cache_hit_callback(on_cache_hit)
+            lifecycle_token = set_lifecycle_callback(on_lifecycle)
             subagent_token = set_subagent_callback(on_subagent_event)
             child_token = set_child_callback(on_child_event)
             try:
                 graph = get_agent_app()
+                record_timing("runtime.setup", (time.monotonic() - previous_step_at) * 1000)
+                previous_step_at = time.monotonic()
                 stream = run_turn(
                     graph,
                     agent_id,
@@ -269,6 +307,7 @@ class AgentRuntime:
                         if (runtime or {}).get("agent_id"):
                             trace_emit("run.lifecycle.cancel", status="cancelled", component="agent_runtime",
                                        duration_ms=(time.monotonic() - run_started_at) * 1000)
+                        previous_step_at = time.monotonic()
                         break
 
                     # stream_mode list yields (mode, data) tuples
@@ -278,14 +317,20 @@ class AgentRuntime:
                         mode, data = "updates", item
 
                     if mode == "custom" and isinstance(data, dict):
-                        # llm.token / subagent.step are already enqueued via ContextVar
-                        # callbacks; skip stream-writer duplicates.
+                        if data.get("kind") == "preflight.status" and data.get("stage") in {
+                            "access", "actions", "context",
+                        }:
+                            event_writer.enqueue("preflight.status", {"stage": data["stage"]})
+                        # llm.token / subagent.step are already enqueued via ContextVar callbacks.
                         continue
 
                     if mode != "updates" or not isinstance(data, dict):
                         continue
 
                     if "__interrupt__" in data:
+                        now = time.monotonic()
+                        record_timing("graph.wait", (now - previous_step_at) * 1000)
+                        previous_step_at = now
                         interrupts = data.get("__interrupt__") or ()
                         intr = interrupts[0] if interrupts else None
                         payload = getattr(intr, "value", None) if intr is not None else None
@@ -320,9 +365,20 @@ class AgentRuntime:
                             trace_emit("run.lifecycle.interrupt", component="agent_runtime",
                                        duration_ms=(time.monotonic() - run_started_at) * 1000,
                                        data={"checkpoint_id": tip})
+                        previous_step_at = time.monotonic()
                         break
 
                     for node_name, updates in data.items():
+                        now = time.monotonic()
+                        record_timing("graph.wait", (now - previous_step_at) * 1000, node=node_name)
+                        previous_step_at = now
+                        if node_name == "preflight_node" and isinstance(updates, dict):
+                            decision = (updates.get("preflight_context") or {}).get("decision")
+                            if decision not in {"allow", "degrade", "clarify", "retry", "deny"}:
+                                decision = "deny"
+                            event_writer.enqueue("preflight.status", {
+                                "stage": "done", "decision": decision,
+                            })
                         event_writer.enqueue(
                             "node.started",
                             {"node": node_name},
@@ -334,72 +390,59 @@ class AgentRuntime:
                         next_step = updates.get("next_step") or {}
                         action = next_step.get("action")
 
-                        if node_name == "agent_node" and updates.get("plan_created"):
+                        if updates.get("plan_created"):
                             event_writer.enqueue("plan.created", updates["plan_created"])
-                        if node_name == "plan_dispatcher" and updates.get("plan_event", {}).get("kind") == "phase.started":
+                        if node_name == "execution_dispatcher" and updates.get("plan_event", {}).get("kind") == "phase.started":
                             event_writer.enqueue("plan.phase.started", updates["plan_event"])
                             for planned in updates["plan_event"]["steps"]:
                                 event_writer.enqueue("plan.step.started", {"sequence": updates["plan_event"]["sequence"], **planned})
-                        if node_name == "phase_collector":
-                            for result in updates.get("step_events") or []:
-                                event_writer.enqueue("plan.step.finished", {**result, "result": _truncate(result.get("result"))})
-                            if updates.get("plan_event", {}).get("kind") == "phase.finished":
-                                event_writer.enqueue("plan.phase.finished", updates["plan_event"])
-
-                        if node_name == "agent_node" and action == "armory":
-                            resource_type = next_step.get("resource_type")
-                            event_writer.enqueue(
-                                "subagent.started" if resource_type == "subagent" else "tool.started",
-                                {
-                                    ("agent_name" if resource_type == "subagent" else "tool_name"):
-                                        next_step.get("resource_name"),
-                                    "tool_args": next_step.get("arguments"),
-                                    "task": next_step.get("task"),
-                                },
-                            )
-                        if "execution_history" in updates and node_name != "phase_collector":
-                            hist = updates.get("execution_history") or []
-                            if hist:
-                                last = (next((entry for entry in hist if entry.get("child_agent_id") ==
-                                              (updates.get("next_step") or {}).get("child_agent_id")), None)
-                                        if node_name == "collect_child" else hist[-1])
-                                if last is None:
-                                    pass
-                                elif last.get("type") == "armory" and last.get("resource_type") == "tool":
+                                if planned.get("action") == "armory":
+                                    resource_type = planned.get("resource_type")
                                     event_writer.enqueue(
-                                        "tool.finished",
+                                        "subagent.started" if resource_type == "subagent" else "tool.started",
                                         {
-                                            "tool_name": last.get("resource_name"),
-                                            "tool_args": last.get("arguments"),
-                                            "task": last.get("task"),
-                                            "result": _truncate(last.get("result")),
-                                            "success": bool(last.get("success", True)),
+                                            "action_id": planned.get("action_id") or planned.get("id"),
+                                            ("agent_name" if resource_type == "subagent" else "tool_name"):
+                                                planned.get("name"),
+                                            "tool_args": planned.get("tool_args") or {},
+                                            "task": planned.get("task"),
                                         },
                                     )
-                                elif last.get("type") == "armory" and last.get("resource_type") == "subagent":
-                                    event_writer.enqueue(
-                                        "subagent.finished",
-                                        {"agent_name": last.get("resource_name"), "task": last.get("task"),
-                                         "result": _truncate(last.get("result")),
-                                         "success": bool(last.get("success", True))},
-                                    )
-                                elif last.get("type") == "child_agent":
-                                    if node_name != "child_agent_node" and (
-                                        node_name != "collect_child" or last.get("status") != "running"
-                                    ):
-                                        event_writer.enqueue(
-                                            "child.started" if last.get("status") == "running" else "child.finished",
-                                            {"child_agent_id": last.get("child_agent_id"),
-                                             "agent_name": last.get("agent_name") or "child_agent",
-                                             "task": last.get("task"),
-                                             "result": _truncate(last.get("result")),
-                                             "success": bool(last.get("success", True))},
-                                        )
+                        if node_name == "output_security_gate":
+                            for output_event in updates.get("output_events") or []:
+                                event = output_event.get("kind")
+                                payload = dict(output_event.get("payload") or {})
+                                if "result" in payload:
+                                    payload["result"] = _truncate(payload["result"])
+                                child_id = payload.get("child_agent_id")
+                                if child_id and event in {"tool.finished", "subagent.finished"}:
+                                    payload["event"] = {
+                                        "kind": "log",
+                                        "step": "armory",
+                                        "status": "completed" if payload.get("success", True) else "error",
+                                        "message": (
+                                            f"{payload.get('tool_name') or payload.get('agent_name')}: "
+                                            f"{_truncate(payload.get('result'))}"
+                                        ),
+                                        "detail": {
+                                            "resource_type": "subagent" if event == "subagent.finished" else "tool",
+                                            "resource_name": payload.get("tool_name") or payload.get("agent_name"),
+                                            "arguments": payload.get("tool_args") or {},
+                                            "result": payload.get("result"),
+                                            "success": payload.get("success", True),
+                                        },
+                                    }
+                                    event_writer.enqueue("child.step", {
+                                        "agent_name": "child_agent",
+                                        "child_agent_id": child_id,
+                                        "event": payload["event"],
+                                    })
+                                if event:
+                                    event_writer.enqueue(event, payload)
 
                         if action == "finish":
                             final_answer = next_step.get("answer")
                             log_event("run.answer", answer=final_answer)
-                            event_writer.enqueue("llm.done", {"channel": "output"})
 
                         event_writer.enqueue(
                             "node.finished",
@@ -414,6 +457,9 @@ class AgentRuntime:
                                 else {},
                             },
                         )
+                        record_timing("runtime.event_delivery", (time.monotonic() - previous_step_at) * 1000,
+                                      node=node_name)
+                        previous_step_at = time.monotonic()
 
                         if action == "finish" and not turn_completed:
                             turn_completed = True
@@ -423,41 +469,61 @@ class AgentRuntime:
                     if not turn_completed:
                         finished = True
                 if finished:
+                    step_started = time.monotonic()
                     if cancel.is_set():
                         outcome = "cancelled"
                     elif runtime and runtime.get("agent_id"):
                         from src.agent.agent_core import child_runner
 
                         child_runner.join(execution_id)
+                    record_timing("runtime.child_join", (time.monotonic() - step_started) * 1000)
+                    step_started = time.monotonic()
                     if outcome == "completed":
                         _emit_turn_complete(event_writer, agent_id=agent_id, execution_id=execution_id,
                                             final_answer=final_answer)
                     elif outcome == "cancelled":
                         event_writer.enqueue("run.completed", {"execution_id": execution_id, "stopped": True,
-                                                               "answer": None, "superseded": self._pop_supersede(agent_id)})
+                                                                "answer": None, "superseded": self._pop_supersede(agent_id)})
+                    record_timing("runtime.finish", (time.monotonic() - step_started) * 1000)
+                    previous_step_at = time.monotonic()
             finally:
                 reset_token_callback(token)
                 reset_cache_hit_callback(cache_hit_token)
+                reset_lifecycle_callback(lifecycle_token)
                 reset_subagent_callback(subagent_token)
                 reset_child_callback(child_token)
         except Exception as exc:
+            from langgraph.errors import GraphRecursionError
+
             outcome = "failed"
             outcome_error = type(exc).__name__
+            if isinstance(exc, GraphRecursionError):
+                from src.config import settings
+
+                max_loops = settings.resolve_max_loops(runtime)
+                error_message = (
+                    f"The agent stopped after reaching its {max_loops}-step execution limit. "
+                    "Try simplifying the request or increase Max loops in Settings."
+                )
+                logger.warning("Agent execution limit reached agent_id=%s max_loops=%s", agent_id, max_loops)
+            else:
+                error_message = str(exc)
+                logger.exception("Agent execution failed agent_id=%s", agent_id)
             if (runtime or {}).get("agent_id"):
                 trace_emit("run.lifecycle.error", status="error", error=exc, component="agent_runtime",
                            duration_ms=(time.monotonic() - run_started_at) * 1000)
-            logger.exception("Agent execution failed agent_id=%s", agent_id)
             try:
                 from src.utils.agent_logger import log_error
 
-                log_error(execution_id=execution_id, message=str(exc))
+                log_error(execution_id=execution_id, message=error_message)
             except Exception:
                 pass
             event_writer.enqueue(
                 "run.error",
-                {"execution_id": execution_id, "message": str(exc)},
+                {"execution_id": execution_id, "message": error_message},
             )
         finally:
+            summarize_timing()
             self._clear_flag(agent_id)
             try:
                 if outcome in {"failed", "cancelled"} and runtime and runtime.get("agent_id"):

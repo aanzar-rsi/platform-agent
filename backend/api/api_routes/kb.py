@@ -55,6 +55,7 @@ class ReviewBody(BaseModel):
 
 class ExpiryBody(BaseModel):
     expires_at: datetime | None = None
+    retention_class: Literal["TRANSIENT", "STANDARD", "LONG_TERM", "LEGAL_HOLD"] | None = None
 
 
 @router.get("/chunks")
@@ -174,6 +175,7 @@ def demote(chunk_id: str, user: Annotated[CurrentUser, Depends(require_user)]):
 @router.post("/chunks/{chunk_id}/expiry")
 def expiry(chunk_id: str, body: ExpiryBody, user: Annotated[CurrentUser, Depends(require_user)]):
     try:
-        return kb.set_expiry(user.uid, user.role, chunk_id, _policy(user, admin=True), body.expires_at)
+        return kb.set_expiry(user.uid, user.role, chunk_id, _policy(user, admin=True), body.expires_at,
+                             retention_class=body.retention_class)
     except (PermissionError, ValueError, KeyError) as exc:
         _handle(exc)

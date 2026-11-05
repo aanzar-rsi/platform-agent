@@ -21,6 +21,7 @@ os.environ["EVA_SKIP_VENV_REEXEC"] = "1"
 from src.config import settings
 from src.models import llm_client
 from src.models.llm_client import call_llm, call_llm_stream
+from src.agent.token_stream import reset_lifecycle_callback, set_lifecycle_callback
 from src.utils import llm_logger as ll
 
 
@@ -220,6 +221,58 @@ class TestUsageAndCostCapture(_MockBase):
         self.assertEqual(self.records[0]["status"], "error")
         self.assertIn("gateway exploded", self.records[0]["error"])
 
+    def test_sync_retries_without_temperature_when_model_rejects_it(self):
+        self.mock_mode(False)
+        attempts = []
+
+        def create(**kwargs):
+            attempts.append(kwargs)
+            if "temperature" in kwargs:
+                raise RuntimeError(
+                    "Unsupported value: 'temperature' does not support 0.7 with this model. "
+                    "Only the default (1) value is supported"
+                )
+            return _Raw(_Completion("fallback ok", _Usage(10, 2)), dict(DEFAULT_HEADERS))
+
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(with_raw_response=SimpleNamespace(create=create))
+            )
+        )
+        with patch.object(llm_client, "_gateway_client", lambda: client):
+            out = call_llm("hello")
+
+        self.assertEqual(out, "fallback ok")
+        self.assertEqual(len(attempts), 2)
+        self.assertIn("temperature", attempts[0])
+        self.assertNotIn("temperature", attempts[1])
+
+    def test_stream_retries_without_temperature_when_model_rejects_it(self):
+        self.mock_mode(False)
+        attempts = []
+
+        def create(**kwargs):
+            attempts.append(kwargs)
+            if "temperature" in kwargs:
+                raise RuntimeError(
+                    "Unsupported value: 'temperature' does not support 0.7 with this model. "
+                    "Only the default (1) value is supported"
+                )
+            return _Raw(iter([_Chunk("ok")]), dict(DEFAULT_HEADERS))
+
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(with_raw_response=SimpleNamespace(create=create))
+            )
+        )
+        with patch.object(llm_client, "_gateway_client", lambda: client):
+            out = "".join(call_llm_stream("hi"))
+
+        self.assertEqual(out, "ok")
+        self.assertEqual(len(attempts), 2)
+        self.assertIn("temperature", attempts[0])
+        self.assertNotIn("temperature", attempts[1])
+
 
 class TestErrorsAreRecorded(_MockBase):
     def test_failed_sync_call_records_an_error_row_and_reraises(self):
@@ -393,6 +446,49 @@ class TestStreamReplay(_MockBase):
         self.assertEqual(rec["mode"], "stream")
         self.assertTrue(rec["cached"])
         self.assertEqual(rec["source_call_id"], self.HIT["call_id"])
+
+
+class TestLifecycleEvents(_MockBase):
+    def capture(self):
+        events = []
+        token = set_lifecycle_callback(lambda event, payload: events.append((event, payload)))
+        self.addCleanup(reset_lifecycle_callback, token)
+        return events
+
+    def test_sync_call_emits_correlated_start_and_done(self):
+        self.mock_mode(False)
+        self.use_gateway(lambda: _Completion("ok", _Usage(1, 1)))
+        events = self.capture()
+
+        self.assertEqual(call_llm("hello"), "ok")
+
+        self.assertEqual([event for event, _ in events], ["llm.started", "llm.done"])
+        self.assertEqual(events[0][1]["call_id"], events[1][1]["call_id"])
+
+    def test_stream_error_emits_correlated_start_and_error(self):
+        self.mock_mode(False)
+        events = self.capture()
+
+        class BrokenProvider(llm_client.BaseLLMProvider):
+            def open_stream(self, **_kwargs):
+                raise RuntimeError("broken")
+
+        client = llm_client.LLMClient(provider=BrokenProvider())
+        with self.assertRaisesRegex(RuntimeError, "broken"):
+            list(client.stream("hello"))
+
+        self.assertEqual([event for event, _ in events], ["llm.started", "llm.error"])
+        self.assertEqual(events[0][1]["call_id"], events[1][1]["call_id"])
+
+    def test_cached_stream_still_emits_start_and_done(self):
+        self.mock_mode(True)
+        self.use_cache(TestStreamReplay.HIT)
+        events = self.capture()
+
+        self.assertEqual("".join(call_llm_stream("say x")), TestStreamReplay.HIT["response_text"])
+
+        self.assertEqual([event for event, _ in events], ["llm.started", "llm.done"])
+        self.assertTrue(events[1][1]["cached"])
 
 
 class TestSandboxStubCompatibility(unittest.TestCase):

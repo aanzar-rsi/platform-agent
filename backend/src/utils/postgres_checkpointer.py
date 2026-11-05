@@ -221,11 +221,12 @@ def build_config(
     *,
     owner_id: str = "local-user",
     checkpoint_id: str | None = None,
-    max_loops: int = 50,
     execution_id: str | None = None,
     runtime: dict[str, Any] | None = None,
 ) -> RunnableConfig:
-    max_loops = int((runtime or {}).get("max_loops", max_loops))
+    from src.config import settings
+
+    max_loops = settings.resolve_max_loops(runtime)
     configurable: dict[str, Any] = {
         "thread_id": agent_id,
         "checkpoint_ns": "",
@@ -237,8 +238,18 @@ def build_config(
         configurable["checkpoint_id"] = checkpoint_id
     configurable.update(runtime or {})
     # User preferences may alter model/UI settings, never identity or checkpoint scope.
-    configurable.update({"thread_id": agent_id, "agent_id": agent_id, "owner_id": owner_id,
-                         "session_id": (runtime or {}).get("session_id")})
+    configurable.update(
+        {
+            "thread_id": agent_id,
+            "agent_id": agent_id,
+            "owner_id": owner_id,
+            "session_id": (runtime or {}).get("session_id"),
+            "request_id": (runtime or {}).get("request_id"),
+            "policy_version": (runtime or {}).get("policy_version"),
+            "execution_id": execution_id or (runtime or {}).get("execution_id"),
+            "preflight_idle_confirmed": bool((runtime or {}).get("preflight_idle_confirmed", False)),
+        }
+    )
     if execution_id:
         configurable["execution_id"] = execution_id
     from src.utils.trace import context
@@ -540,6 +551,7 @@ def initial_state_for_thread(
     query: str,
     *,
     preloaded_context: dict[str, Any] | None = None,
+    planner_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Full state for a brand-new thread; message-only delta for existing ones."""
     from langchain_core.messages import HumanMessage
@@ -547,7 +559,11 @@ def initial_state_for_thread(
     human = HumanMessage(content=query)
     if thread_has_state(thread_id):
         return {"messages": [human], "planned_phases": [], "planned_phase_index": 0,
-                "plan_created": {}, "plan_event": {}, "step_events": [], "phase_step_results": []}
+                "plan_created": {}, "plan_event": {}, "step_events": [], "step_results": [],
+                "executor_output": {}, "output_events": [], "dispatch_target": "",
+                "planner_request": planner_request or {},
+                "preflight_context": {}, "admission_context": {}, "preflight_retry_count": 0,
+                "preflight_resume": False, "planner_context": {}}
     return {
         "messages": [human],
         "execution_history": [],
@@ -558,6 +574,8 @@ def initial_state_for_thread(
             "truncated": False,
             "entries": [],
         },
+        "context_selection_history": [],
+        "context_selection_summary": {},
         "current_task": "",
         "next_step": {},
         "preloaded_context": preloaded_context or {},
@@ -567,7 +585,20 @@ def initial_state_for_thread(
         "plan_created": {},
         "plan_event": {},
         "step_events": [],
-        "phase_step_results": [],
+        "step_results": [],
+        "action_sequence": 0,
+        "executor_output": {},
+        "output_events": [],
+        "dispatch_target": "",
+        "dispatch_step": {},
+        "pending_context_selection": {},
+        "human_request_kind": "",
+        "planner_request": planner_request or {},
+        "preflight_context": {},
+        "admission_context": {},
+        "preflight_retry_count": 0,
+        "preflight_resume": False,
+        "planner_context": {},
     }
 
 
@@ -601,6 +632,7 @@ def run_turn(
     import uuid
 
     from langgraph.types import Command
+    from src.agent.preflight.request_contract import build_object_id
     from src.utils.trace import current_ids, emit as trace_emit
 
     from src.utils.agent_logger import (
@@ -617,7 +649,6 @@ def run_turn(
         owner_id=owner_id,
         checkpoint_id=None if is_resume else checkpoint_id,
         execution_id=resolved_execution_id,
-        max_loops=int((runtime or {}).get("max_loops", 50)),
         runtime=runtime,
     )
     if is_resume:
@@ -627,6 +658,11 @@ def run_turn(
             agent_id,
             query or "",
             preloaded_context=preloaded_context,
+            planner_request={
+                "request_id": build_object_id((runtime or {}).get("request_id")),
+                "query_type": (runtime or {}).get("query_type") or "chat",
+                "query": query or "",
+            },
         )
 
     def _stream():

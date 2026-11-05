@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from api.core.logging_setup import configure_logging
 import src.utils.trace as trace_module
 from src.utils.trace import bind, emit, reset, span
 from src.utils.trace import bind_from_config, traced_node
@@ -110,7 +111,9 @@ def test_trace_persists_session_json(tmp_path):
         reset(token)
         trace_module._TRACE_DIR = original
 
-    path = tmp_path / "agent_1.json"
+    matches = list(tmp_path.glob("*_agent_1.json"))
+    assert len(matches) == 1
+    path = matches[0]
     assert path.exists()
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["session_id"] == "sess:1"
@@ -119,3 +122,65 @@ def test_trace_persists_session_json(tmp_path):
         "session.websocket.attach",
         "session.websocket.detach",
     ]
+
+
+def test_preflight_progress_logs_safe_summary_without_trace_toggle(caplog, monkeypatch, tmp_path):
+    monkeypatch.delenv("EVA_TRACE_LOGGER_ENABLED", raising=False)
+    monkeypatch.setattr(trace_module, "_TRACE_DIR", tmp_path)
+    token = bind(agent_id="agent1", execution_id="execution1", request_id="request1")
+    try:
+        with caplog.at_level(logging.INFO, logger="agent.trace"):
+            emit("preflight.stage", component="preflight", data={
+                "stage": "identity", "decision": "allow", "reason_code": "identity_resolved",
+                "query": "private query", "auth_headers": "secret token",
+            })
+            emit("preflight.decision", component="preflight", data={
+                "decision": "allow", "reason_code": "context_ready", "returned_count": 4,
+            })
+        messages = [record.message for record in caplog.records if record.name == "agent.trace"]
+        assert len(messages) == 2
+        assert "preflight.stage" in messages[0]
+        assert "request_id=request1" in messages[0]
+        assert "stage=identity decision=allow reason_code=identity_resolved" in messages[0]
+        assert "preflight.decision" in messages[1]
+        assert "returned_count=4" in messages[1]
+        assert "private query" not in str(messages)
+        assert "secret token" not in str(messages)
+    finally:
+        reset(token)
+
+
+def test_timing_summary_is_bounded_and_omits_request_content(monkeypatch, tmp_path):
+    monkeypatch.setattr(trace_module, "_TRACE_DIR", tmp_path)
+    token = bind(agent_id="agent1", execution_id="execution1")
+    try:
+        record = emit("run.timing.summary", duration_ms=240000, data={
+            "elapsed_ms": 240000, "step_count": 2,
+            "stage_totals_ms": {"graph.wait": 220000},
+            "slowest_steps": [{"stage": "graph.wait", "node": "preflight_node", "duration_ms": 115000,
+                               "query": "private request"}] * 8,
+            "query": "private request",
+        })
+        assert record["metrics"]["duration_ms"] == 240000
+        assert len(record["data"]["slowest_steps"]) == 5
+        assert "private request" not in str(record)
+    finally:
+        reset(token)
+
+
+def test_configured_logging_exposes_preflight_summary(caplog, monkeypatch, tmp_path):
+    monkeypatch.delenv("EVA_TRACE_LOGGER_ENABLED", raising=False)
+    monkeypatch.setattr(trace_module, "_TRACE_DIR", tmp_path)
+    logger = logging.getLogger("agent.trace")
+    old_handlers, old_propagate, old_level = logger.handlers[:], logger.propagate, logger.level
+    try:
+        configure_logging()
+        token = bind(agent_id="agent1", execution_id="execution1")
+        try:
+            with caplog.at_level(logging.INFO):
+                emit("preflight.decision", data={"decision": "allow", "reason_code": "context_ready"})
+        finally:
+            reset(token)
+        assert any("preflight.decision" in record.message for record in caplog.records)
+    finally:
+        logger.handlers, logger.propagate, logger.level = old_handlers, old_propagate, old_level

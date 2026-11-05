@@ -158,11 +158,10 @@ def process_idle_sessions(
                 last_status,
                 outcome.get("stored_count"),
             )
-        mark(
-            agent_id,
-            experience_learn_status=last_status,
-            experience_learned_at=datetime.now(timezone.utc).isoformat(),
-        )
+        fields = {"experience_learn_status": last_status}
+        if last_status != "pending_confirmation":
+            fields["experience_learned_at"] = datetime.now(timezone.utc).isoformat()
+        mark(agent_id, **fields)
     return results
 
 

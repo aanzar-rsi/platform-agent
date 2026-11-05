@@ -12,28 +12,34 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from langgraph.graph import END
 from langchain_core.messages import HumanMessage
+from langgraph.graph import END
 
 from src.agent.edges.routing import (
     ARMORY_NODE,
     CHILD_AGENT_NODE,
     CONTEXT_SELECTOR_NODE,
-    route_from_agent,
-    route_from_input_gate,
+    HUMAN_INPUT_NODE,
+    INPUT_SECURITY_GATE_NODE,
+    route_from_human_input,
+    route_from_preflight,
 )
+from src.agent.nodes.execution_dispatcher import dispatch_execution
 from src.agent.memory import (
     CONTEXT_MEMORY_BUDGET,
     build_execution_memory_index,
     count_content_tokens,
     empty_context_memory,
+    record_context_selection,
     serialize_content,
     slice_by_tokens,
     slim_execution_history,
+    summarize_context_selection_history,
     update_context_memory,
 )
 from src.agent.nodes.agentnode import _format_conversation, _latest_human_content, _parse_response, _run_stream
 from src.agent.nodes.context_selector import context_selector_node
+from src.agent.nodes.preflight import preflight_node
 from src.models.llm_client import count_tokens
 from src.prompts.prompt_loader import agentnode_prompt_loader, to_toon
 import toons
@@ -189,10 +195,9 @@ class TestUpdateContextMemory(unittest.TestCase):
         cm = update_context_memory(cm, key="b", content=_tokens_of_chars(40), budget=budget)
         cm = update_context_memory(cm, key="c", content=_tokens_of_chars(40), budget=budget)
         keys = [e["key"] for e in cm["entries"]]
-        self.assertIn("a", keys)
-        self.assertEqual(cm["entries"][0]["from_token"], 20)
+        self.assertNotIn("a", keys)
         self.assertIn("c", keys)
-        self.assertLessEqual(cm["used_tokens"], budget)
+        self.assertLessEqual(count_tokens(toons.dumps(cm))["input"], budget)
 
     def test_exact_budget_fit_clears_others(self):
         budget = 50
@@ -203,7 +208,8 @@ class TestUpdateContextMemory(unittest.TestCase):
             cm, key="new", content=_tokens_of_chars(50), budget=budget
         )
         self.assertEqual([e["key"] for e in cm["entries"]], ["new"])
-        self.assertEqual(cm["used_tokens"], 50)
+        self.assertLess(cm["used_tokens"], 50)  # rendered metadata uses part of the quota
+        self.assertLessEqual(count_tokens(toons.dumps(cm))["input"], budget)
 
     def test_same_key_replaced_not_duplicated(self):
         text = _tokens_of_chars(200)
@@ -222,7 +228,7 @@ class TestUpdateContextMemory(unittest.TestCase):
         self.assertEqual(e["from_token"], 100)
         self.assertEqual(e["to_token"], 150)
         self.assertEqual(e["total_tokens"], 300)
-        self.assertFalse(cm["truncated"])
+        self.assertTrue(cm["truncated"])
 
     def test_requested_range_larger_than_budget_sets_truncated(self):
         text = _tokens_of_chars(10000)
@@ -306,8 +312,9 @@ class TestIndexAndSlimHistory(unittest.TestCase):
         slim = slim_execution_history(hist)
         self.assertEqual(len(slim), 1)
         self.assertNotIn("result", slim[0])
+        self.assertEqual(slim[0]["task"], "load")
         self.assertEqual(slim[0]["key"], "tool_1")
-        self.assertGreater(slim[0]["tokens"], 0)
+        self.assertTrue(slim[0]["success"])
 
     def test_slim_history_skips_non_dicts(self):
         self.assertEqual(slim_execution_history(["x", None, 1]), [])
@@ -337,7 +344,7 @@ class TestContextSelectorNode(unittest.TestCase):
         out = context_selector_node(self._state())
         self.assertIn("context_memory", out)
         self.assertEqual(out["context_memory"]["entries"][0]["key"], "tool_1")
-        self.assertEqual(len(out), 1)  # only context_memory returned
+        self.assertEqual(out["next_step"], {})
 
     def test_token_range(self):
         out = context_selector_node(
@@ -408,36 +415,258 @@ class TestContextSelectorNode(unittest.TestCase):
         self.assertEqual(len([e for e in entries if e["key"] == "tool_1"]), 1)
         self.assertEqual(entries[-1]["from_token"], 80)
 
+    def test_records_selection_history_and_summary(self):
+        out = context_selector_node(self._state(next_step={"key": "tool_1", "from_token": 10, "to_token": 20}))
+        self.assertIn("context_selection_history", out)
+        self.assertEqual(out["context_selection_history"][-1]["key"], "tool_1")
+        self.assertEqual(out["context_selection_summary"]["selection_count"], 1)
+        self.assertFalse(out["context_selection_summary"]["loop_detected"])
+        self.assertEqual(out["execution_history"][-1]["type"], "context_select")
+
+
+class TestContextSelectionSummary(unittest.TestCase):
+    def test_loop_summary_detects_two_window_ping_pong(self):
+        history = []
+        for _ in range(3):
+            history, _ = record_context_selection(
+                history,
+                key="tool_1",
+                from_token=0,
+                to_token=100,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=300,
+            )
+            history, summary = record_context_selection(
+                history,
+                key="tool_1",
+                from_token=100,
+                to_token=200,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=300,
+            )
+        self.assertTrue(summary["loop_detected"])
+        self.assertIn("repeated", summary["reason"])
+        self.assertEqual(summary["selection_count"], 6)
+
+    def test_loop_summary_detects_same_window_repeated(self):
+        summary = summarize_context_selection_history(
+            [
+                {"key": "tool_1", "from_token": 0, "to_token": 50, "loaded_tokens": 50, "found": True},
+                {"key": "tool_1", "from_token": 0, "to_token": 50, "loaded_tokens": 50, "found": True},
+                {"key": "tool_1", "from_token": 0, "to_token": 50, "loaded_tokens": 50, "found": True},
+            ]
+        )
+        self.assertTrue(summary["loop_detected"])
+        self.assertIn("same context window", summary["reason"])
+
+    def test_loop_summary_reports_global_repeated_windows(self):
+        history = []
+        for key in ("tool_1", "tool_2", "tool_3", "tool_4"):
+            history, _ = record_context_selection(
+                history,
+                key=key,
+                from_token=0,
+                to_token=100,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=500,
+            )
+        for _ in range(3):
+            history, summary = record_context_selection(
+                history,
+                key="tool_1",
+                from_token=0,
+                to_token=100,
+                found=True,
+                loaded_tokens=100,
+                total_tokens=500,
+            )
+        self.assertTrue(summary["loop_detected"])
+        self.assertIn("repeatedly", summary["reason"])
+        self.assertEqual(summary["repeated_windows_global"][0]["key"], "tool_1")
+
 
 class TestRouting(unittest.TestCase):
     def test_armory(self):
-        self.assertEqual(route_from_agent({"next_step": {"action": "armory"}}), ARMORY_NODE)
+        state = {"dispatch_target": "execute", "planned_phase_index": 0,
+                 "planned_phases": [{"sequence": 1, "steps": [{"id": "a", "action": "command",
+                     "command": {"action": "armory"}, "task": "", "name": ""}]}]}
+        self.assertEqual(dispatch_execution(state)[0].node, ARMORY_NODE)
 
     def test_child_agent(self):
-        self.assertEqual(
-            route_from_agent({"next_step": {"action": "child_agent"}}), CHILD_AGENT_NODE
-        )
+        state = {"dispatch_target": "execute", "planned_phase_index": 0,
+                 "planned_phases": [{"sequence": 1, "steps": [{"id": "a", "action": "command",
+                     "command": {"action": "child_agent"}, "task": "", "name": ""}]}]}
+        self.assertEqual(dispatch_execution(state)[0].node, CHILD_AGENT_NODE)
 
     def test_context_select(self):
+        self.assertEqual(dispatch_execution({"dispatch_target": CONTEXT_SELECTOR_NODE}), CONTEXT_SELECTOR_NODE)
+
+    def test_preflight_routes_deny_to_end(self):
+        self.assertEqual(route_from_preflight({"preflight_context": {"decision": "deny"}}), END)
+
+    def test_preflight_routes_allow_to_input_gate(self):
         self.assertEqual(
-            route_from_agent({"next_step": {"action": "context_select"}}),
-            CONTEXT_SELECTOR_NODE,
+            route_from_preflight({"preflight_context": {"decision": "allow"}}),
+            INPUT_SECURITY_GATE_NODE,
         )
 
-    def test_finish(self):
-        self.assertEqual(route_from_agent({"next_step": {"action": "finish"}}), END)
+    def test_preflight_routes_clarify_to_human_input(self):
+        self.assertEqual(
+            route_from_preflight({"preflight_context": {"decision": "clarify"}}),
+            HUMAN_INPUT_NODE,
+        )
 
-    def test_missing_next_step_ends(self):
-        self.assertEqual(route_from_agent({}), END)
+    def test_preflight_routes_retry_to_preflight(self):
+        self.assertEqual(
+            route_from_preflight({"preflight_context": {"decision": "retry"}}),
+            "preflight_node",
+        )
 
-    def test_unknown_action_ends(self):
-        self.assertEqual(route_from_agent({"next_step": {"action": "nope"}}), END)
+    def test_human_input_routes_preflight_action_back_to_preflight(self):
+        self.assertEqual(route_from_human_input({"next_step": {"action": "preflight"}}), "preflight_node")
 
-    def test_input_gate_reuses_action_map(self):
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "armory"}}), ARMORY_NODE)
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "child_agent"}}), CHILD_AGENT_NODE)
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "context_select"}}), CONTEXT_SELECTOR_NODE)
-        self.assertEqual(route_from_input_gate({"next_step": {"action": "finish"}}), END)
+class TestPreflightNode(unittest.TestCase):
+    def test_preflight_stage_trace_omits_query_and_credentials(self):
+        from src.agent.nodes.preflight.node import _trace_stage
+
+        with patch("src.agent.nodes.preflight.node.in_run", return_value=True), \
+             patch("src.agent.nodes.preflight.node.trace_emit") as emit:
+            _trace_stage("resources", "allow", "resources_filtered", count=8)
+        self.assertEqual(emit.call_args.args, ("preflight.stage",))
+        self.assertEqual(emit.call_args.kwargs["data"], {
+            "stage": "resources", "decision": "allow", "reason_code": "resources_filtered", "returned_count": 8,
+        })
+
+    @patch("src.agent.nodes.preflight.node.resolve_preflight_identity")
+    @patch("src.agent.nodes.preflight.node.evaluate_admission")
+    @patch("src.agent.nodes.preflight.node.load_governed_context")
+    def test_preflight_writes_safe_planner_context(self, governed, admission, resolver):
+        resolver.return_value = MagicMock(
+            decision="allow",
+            reason_code="identity_resolved",
+            context={
+                "tenant_id": "t1",
+                "role_id": "r1",
+                "user_id": "u1",
+                "permissions": ["quotation.read", "quotation.compare"],
+                "tenant_policy": {
+                    "permission_domains": {"quotation": "procurement"},
+                },
+            },
+        )
+        admission.return_value = MagicMock(
+            decision="allow",
+            reason_code="admission_passed",
+            context={
+                "decision": "allow",
+                "reason_code": "admission_passed",
+                "query_char_count": 5,
+                "attachment_count": 0,
+                "retry_count": 0,
+                "checks": {},
+            },
+        )
+        governed.return_value = MagicMock(
+            decision="allow",
+            reason_code="context_ready",
+            details={},
+            planner_context=lambda: {"items": [], "memory_references": [], "reduced": False, "degradations": []},
+        )
+        with patch("src.agent.nodes.preflight.node.authorize_request", return_value=MagicMock(
+            decision="allow", reason_code="business_authorized",
+            held=("quotation.compare", "quotation.read"), required=("quotation.compare", "quotation.read"),
+        )), patch("src.agent.preflight.repository.get_tenant_permission_catalog", return_value=[
+            {"code": "quotation.read"}, {"code": "quotation.compare"},
+        ]), patch("src.agent.facets.Armory.list", return_value=[]):
+            out = preflight_node(
+                {
+                    "planned_phases": [],
+                    "planner_request": {"request_id": "65f0a1b2c3d4e5f607182901", "query": "hello", "query_type": "chat"},
+                },
+                config={},
+            )
+
+        self.assertEqual(out["next_step"], {"action": "replan"})
+        self.assertEqual(out["plan_event"]["kind"], "preflight.ready")
+        self.assertEqual(out["plan_event"]["reason_code"], "context_ready")
+        self.assertEqual(out["plan_event"]["role_id"], "r1")
+        self.assertEqual(out["plan_event"]["permission_count"], 2)
+        self.assertEqual(out["preflight_context"]["tenant_id"], "t1")
+        self.assertEqual(out["planner_context"]["version"], 3)
+        self.assertEqual(out["planner_context"]["identity"]["role_id"], "r1")
+        self.assertEqual(out["planner_context"]["authorization"]["permissions"], ["quotation.compare", "quotation.read"])
+        self.assertEqual(out["planner_context"]["authorization"]["permissions_needed"], ["quotation.compare", "quotation.read"])
+        self.assertEqual(out["planner_context"]["domain"], "procurement")
+        self.assertEqual(out["planner_context"]["readiness"]["missing_fields"], [])
+        self.assertNotIn("query", out["planner_context"])
+
+    def test_preflight_denies_missing_request_id(self):
+        out = preflight_node({"planner_request": {"query": "hello", "query_type": "chat"}}, config={})
+        self.assertEqual(out["next_step"]["action"], "finish")
+        self.assertEqual(out["plan_event"]["kind"], "preflight.denied")
+
+    def test_preflight_denies_invalid_object_id_request_id(self):
+        out = preflight_node({"planner_request": {"request_id": "req_1", "query": "hello", "query_type": "chat"}}, config={})
+        self.assertEqual(out["next_step"]["action"], "finish")
+        self.assertEqual(out["plan_event"]["reason_code"], "request_id_invalid")
+
+    @patch("src.agent.nodes.preflight.node.resolve_preflight_identity")
+    def test_preflight_denies_when_identity_resolution_denies(self, resolver):
+        resolver.return_value = MagicMock(
+            decision="deny",
+            reason_code="tenant_membership_missing",
+            message="Blocked preflight: no tenant membership found for authenticated user",
+            context={"decision": "deny", "user_id": "u1"},
+        )
+        out = preflight_node(
+            {"planner_request": {"request_id": "65f0a1b2c3d4e5f607182901", "query": "hello", "query_type": "chat"}},
+            config={"configurable": {"owner_id": "u1", "session_id": "s1"}},
+        )
+        self.assertEqual(out["next_step"]["action"], "finish")
+        self.assertEqual(out["plan_event"]["kind"], "preflight.denied")
+        self.assertEqual(out["plan_event"]["reason_code"], "tenant_membership_missing")
+        self.assertEqual(out["preflight_context"]["decision"], "deny")
+        self.assertEqual(out["planner_context"], {})
+
+    @patch("src.agent.nodes.preflight.node.resolve_preflight_identity")
+    @patch("src.agent.nodes.preflight.node.evaluate_admission")
+    def test_preflight_denial_from_admission_skips_planner_context(self, admission, resolver):
+        resolver.return_value = MagicMock(decision="allow", reason_code="identity_resolved", context={"user_id": "u1"})
+        admission.return_value = MagicMock(
+            decision="deny",
+            reason_code="auth_session_invalid",
+            message="Blocked request",
+            context={"decision": "deny", "reason_code": "auth_session_invalid"},
+        )
+        out = preflight_node(
+            {"planner_request": {"request_id": "65f0a1b2c3d4e5f607182901", "query": "hello", "query_type": "chat"}},
+            config={"configurable": {"owner_id": "u1", "session_id": "s1"}},
+        )
+        self.assertEqual(out["planner_context"], {})
+        self.assertEqual(out["next_step"]["action"], "finish")
+
+    @patch("src.agent.nodes.preflight.node.resolve_preflight_identity", side_effect=RuntimeError("db offline"))
+    def test_preflight_denies_when_identity_store_is_unavailable(self, _resolver):
+        out = preflight_node(
+            {"planner_request": {"request_id": "65f0a1b2c3d4e5f607182901", "query": "hello", "query_type": "chat"}},
+            config={},
+        )
+        self.assertEqual(out["plan_event"]["reason_code"], "identity_unavailable")
+        self.assertEqual(out["planner_context"], {})
+
+    @patch("src.agent.nodes.preflight.node.resolve_preflight_identity")
+    @patch("src.agent.nodes.preflight.node.evaluate_admission", side_effect=RuntimeError("db offline"))
+    def test_preflight_denies_when_admission_store_is_unavailable(self, _admission, resolver):
+        resolver.return_value = MagicMock(decision="allow", reason_code="identity_resolved", context={"user_id": "u1"})
+        out = preflight_node(
+            {"planner_request": {"request_id": "65f0a1b2c3d4e5f607182901", "query": "hello", "query_type": "chat"}},
+            config={},
+        )
+        self.assertEqual(out["plan_event"]["reason_code"], "admission_unavailable")
+        self.assertEqual(out["planner_context"], {})
 
 
 class TestAgentParseResponse(unittest.TestCase):
@@ -610,6 +839,7 @@ class TestPromptLoader(unittest.TestCase):
             execution_history=hist,
             execution_memory_index=index,
             context_memory=cm,
+            context_selection_summary={"selection_count": 1, "loop_detected": False},
             turn_start=False,
         )
         self.assertIn("execution_memory_index", user)
@@ -633,6 +863,7 @@ class TestPromptLoader(unittest.TestCase):
             execution_history=[],
             execution_memory_index=[],
             context_memory=empty_context_memory(),
+            context_selection_summary={},
             turn_start=True,
         )
         self.assertIn("session_intent", user)
@@ -718,40 +949,122 @@ class TestToonTokenSavings(unittest.TestCase):
             execution_history=slim_execution_history([]),
             execution_memory_index=index,
             context_memory=empty_context_memory(),
+            context_selection_summary={},
         )
         self.assertIn("[2]{key,type,name,task,total_tokens,in_context}:", user)
         self.assertNotIn('{\n  "key": "tool_1"', user)
 
 
 class TestArmoryIngest(unittest.TestCase):
-    def test_armory_result_is_recorded_and_ingested(self):
+    def test_write_confirmation_is_bound_to_exact_arguments(self):
         from src.agent.nodes.armory_node import armory_node
 
-        with patch("src.agent.nodes.armory_node.Armory.get", return_value=MagicMock(confirmation_required=False)), \
-             patch("src.agent.nodes.armory_node.Armory.call", return_value=({"success": True, "value": "done"}, None)):
+        resource = MagicMock(confirmation_required=False)
+        resource.target.remote_name = "BAPI_PO_CREATE"
+        with patch("src.agent.nodes.armory_node.Armory.get", return_value=resource), \
+             patch("src.agent.nodes.armory_node.Armory.call", return_value=({"success": True}, None)) as call, \
+             patch("src.agent.preflight.authorization.check_resource_execution"), \
+             patch("src.agent.preflight.repository.get_bapi_for_resource", return_value={"effect": "write"}), \
+             patch("langgraph.types.interrupt") as interrupt:
+            interrupt.side_effect = lambda payload: {
+                "approved": True,
+                "confirmation_id": payload["confirmation_id"],
+            }
             out = armory_node({
                 "next_step": {"action": "armory", "resource_type": "tool",
-                              "resource_name": "lookup", "arguments": {"q": "x"}, "task": "once"},
+                              "resource_name": "po_create", "arguments": {"vendor_id": 1, "items": []},
+                              "task": "create", "action_id": "write-1"},
+                "execution_history": [], "execution_memory": {},
+                "context_memory": empty_context_memory(), "current_task": "create",
+                "preflight_context": {"decision": "allow", "tenant_policy": {"confirm_writes": True}},
+                "planner_context": {
+                    "resources": [{"type": "tool", "name": "po_create"}],
+                    "readiness": {"write_requires_confirmation": True},
+                },
+            })
+        self.assertTrue(out["step_results"][0]["results"][-1]["success"])
+        self.assertEqual(interrupt.call_args.args[0]["kind"], "confirm_tool")
+        call.assert_called_once()
+
+    def test_write_confirmation_rejects_mismatched_binding(self):
+        from src.agent.nodes.armory_node import armory_node
+
+        resource = MagicMock(confirmation_required=False)
+        resource.target.remote_name = "BAPI_PO_CREATE"
+        with patch("src.agent.nodes.armory_node.Armory.get", return_value=resource), \
+             patch("src.agent.nodes.armory_node.Armory.call") as call, \
+             patch("src.agent.preflight.authorization.check_resource_execution"), \
+             patch("src.agent.preflight.repository.get_bapi_for_resource", return_value={"effect": "write"}), \
+             patch("langgraph.types.interrupt", return_value={"approved": True, "confirmation_id": "wrong"}):
+            out = armory_node({
+                "next_step": {"action": "armory", "resource_type": "tool",
+                              "resource_name": "po_create", "arguments": {"vendor_id": 1, "items": []},
+                              "task": "create", "action_id": "write-2"},
+                "execution_history": [], "execution_memory": {},
+                "context_memory": empty_context_memory(), "current_task": "create",
+                "preflight_context": {"decision": "allow", "tenant_policy": {"confirm_writes": True}},
+                "planner_context": {
+                    "resources": [{"type": "tool", "name": "po_create"}],
+                    "readiness": {"write_requires_confirmation": True},
+                },
+            })
+        self.assertFalse(out["step_results"][0]["results"][-1]["success"])
+        call.assert_not_called()
+
+    def test_armory_result_is_recorded_and_ingested(self):
+        from src.agent.nodes.armory_node import armory_node
+        from src.agent.nodes.output_security_gate import output_security_gate_node
+
+        with patch("src.agent.nodes.armory_node.Armory.get", return_value=MagicMock(confirmation_required=False)), \
+             patch("src.agent.nodes.armory_node.Armory.call", return_value=({"success": True, "value": "done"}, None)), \
+             patch("src.agent.preflight.authorization.check_resource_execution"):
+            state = {
+                "next_step": {"action": "armory", "resource_type": "tool",
+                              "resource_name": "lookup", "arguments": {"q": "x"}, "task": "once",
+                              "action_id": "run:action:1"},
                 "execution_history": [], "execution_memory": {},
                 "context_memory": empty_context_memory(), "current_task": "once",
-            })
+                "dispatch_step": {"id": "run:action:1", "sequence": 1, "action": "armory",
+                                  "task": "once", "name": "lookup"},
+                "planned_phases": [{"sequence": 1, "steps": [{"id": "run:action:1"}]}],
+                "planned_phase_index": 0,
+                "preflight_context": {"decision": "allow"},
+                "planner_context": {"resources": [{"type": "tool", "name": "lookup"}]},
+            }
+            from src.agent.nodes.result_collector import result_collector_node
+            branch = armory_node(state)
+            out = output_security_gate_node({**state, **branch,
+                                             **result_collector_node({**state, **branch})})
         self.assertTrue(out["execution_history"][-1]["success"])
         self.assertEqual(out["execution_history"][-1]["resource"], "armory.tool.lookup")
-        self.assertIn("armory_1", out["execution_memory"])
+        self.assertIn("execution:phase:1:step:run:action:1", out["execution_memory"])
 
     def test_armory_oversized_result_truncates_in_context(self):
         from src.agent.nodes.armory_node import armory_node
+        from src.agent.nodes.output_security_gate import output_security_gate_node
 
         huge = _tokens_of_chars(CONTEXT_MEMORY_BUDGET + 100)
         with patch("src.agent.nodes.armory_node.Armory.get", return_value=MagicMock(confirmation_required=False)), \
-             patch("src.agent.nodes.armory_node.Armory.call", return_value=(huge, None)):
-            out = armory_node({
+             patch("src.agent.nodes.armory_node.Armory.call", return_value=(huge, None)), \
+             patch("src.agent.preflight.authorization.check_resource_execution"):
+            state = {
                 "next_step": {"action": "armory", "resource_type": "tool",
-                              "resource_name": "huge", "arguments": {}, "task": "t"},
+                              "resource_name": "huge", "arguments": {}, "task": "t",
+                              "action_id": "run:action:1"},
                 "execution_history": [], "execution_memory": {},
                 "context_memory": empty_context_memory(), "current_task": "t",
-            })
-        self.assertEqual(out["execution_memory"]["armory_1"]["result"], huge)
+                "dispatch_step": {"id": "run:action:1", "sequence": 1, "action": "armory",
+                                  "task": "t", "name": "huge"},
+                "planned_phases": [{"sequence": 1, "steps": [{"id": "run:action:1"}]}],
+                "planned_phase_index": 0,
+                "preflight_context": {"decision": "allow"},
+                "planner_context": {"resources": [{"type": "tool", "name": "huge"}]},
+            }
+            from src.agent.nodes.result_collector import result_collector_node
+            branch = armory_node(state)
+            out = output_security_gate_node({**state, **branch,
+                                             **result_collector_node({**state, **branch})})
+        self.assertEqual(out["execution_memory"]["execution:phase:1:step:run:action:1"]["result"], huge)
         self.assertTrue(out["context_memory"]["truncated"])
 
     def test_fifo_trims_only_needed_prefix(self):
@@ -759,9 +1072,9 @@ class TestArmoryIngest(unittest.TestCase):
         cm = update_context_memory(cm, key="a", content=_tokens_of_chars(70), budget=100)
         cm = update_context_memory(cm, key="b", content=_tokens_of_chars(50), budget=100)
         self.assertEqual([entry["key"] for entry in cm["entries"]], ["a", "b"])
-        self.assertEqual(cm["entries"][0]["from_token"], 20)
+        self.assertGreater(cm["entries"][0]["from_token"], 20)
         self.assertFalse(cm["entries"][0]["complete"])
-        self.assertEqual(cm["used_tokens"], 100)
+        self.assertLessEqual(count_tokens(toons.dumps(cm))["input"], 100)
 
 
 class TestGraphWiring(unittest.TestCase):

@@ -436,6 +436,14 @@ def main() -> int:
             err = ws.receive_json()
             check("ws run.start empty query -> error", err.get("type") == "error", str(err))
 
+            ws.send_json({"id": "req_bad_type", "type": "run.start", "payload": {"query": "hello", "query_type": "search"}})
+            err = ws.receive_json()
+            check("ws run.start invalid query_type -> error", err.get("type") == "error", str(err))
+
+            ws.send_json({"id": "req_too_big", "type": "run.start", "payload": {"query": "x" * 10001}})
+            err = ws.receive_json()
+            check("ws run.start oversized query -> error", err.get("type") == "error", str(err))
+
             ws.send_json(
                 {"type": "run.rollback", "payload": {"checkpoint_id": "cp_ws_roll"}}
             )

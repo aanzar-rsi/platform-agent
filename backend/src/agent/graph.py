@@ -1,89 +1,81 @@
-"""
-Agent graph definition.
-"""
+"""Preflight-gated agent graph with validated execution batches."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import logging
 
 from langgraph.graph import END, START, StateGraph
 
 from src.agent.edges.routing import (
-    AGENT_NODE,
-    INPUT_SECURITY_GATE_NODE,
-    OUTPUT_SECURITY_GATE_NODE,
-    CHILD_AGENT_NODE,
-    CONTEXT_SELECTOR_NODE,
-    HUMAN_INPUT_NODE,
-    ARMORY_NODE,
-    COLLECT_CHILD_NODE,
-    route_from_input_gate,
+    AGENT_NODE, ARMORY_NODE, CHILD_AGENT_NODE, COLLECT_CHILD_NODE,
+    CONTEXT_SELECTOR_NODE, EXECUTION_DISPATCHER_NODE, HUMAN_INPUT_NODE,
+    INPUT_SECURITY_GATE_NODE, OUTPUT_SECURITY_GATE_NODE, RESULT_COLLECTOR_NODE,
+    route_from_preflight, route_from_human_input,
 )
 from src.agent.nodes.agentnode import agent_node
+from src.agent.nodes.armory_node import armory_node
+from src.agent.nodes.child_agent_node import child_agent_node
+from src.agent.nodes.collect_child import collect_child_node
+from src.agent.nodes.context_selector import context_selector_node
+from src.agent.nodes.execution_dispatcher import dispatch_execution, execution_dispatcher_node
+from src.agent.nodes.human_input import human_input_node
 from src.agent.nodes.input_security_gate import input_security_gate_node
 from src.agent.nodes.output_security_gate import output_security_gate_node
-from src.agent.nodes.context_selector import context_selector_node
-from src.agent.nodes.collect_child import collect_child_node
-from src.agent.nodes.child_agent_node import child_agent_node
-from src.agent.nodes.human_input import human_input_node
-from src.agent.nodes.armory_node import armory_node
-from src.agent.nodes.plan_dispatcher import dispatch_phase, phase_collector_node, plan_dispatcher_node, planned_step_node
+from src.agent.nodes.preflight import preflight_node
+from src.agent.nodes.result_collector import result_collector_node
 from src.agent.state import AgentConfig, PlanExecuteState
 from src.utils.postgres_checkpointer import get_checkpointer
 from src.utils.trace import traced_node
 
+logger = logging.getLogger(__name__)
 workflow = StateGraph(PlanExecuteState, context_schema=AgentConfig)
+for name, node in (
+    ("preflight_node", preflight_node), (AGENT_NODE, agent_node),
+    (INPUT_SECURITY_GATE_NODE, input_security_gate_node),
+    (EXECUTION_DISPATCHER_NODE, execution_dispatcher_node),
+    (ARMORY_NODE, armory_node), (CHILD_AGENT_NODE, child_agent_node),
+    (COLLECT_CHILD_NODE, collect_child_node), (HUMAN_INPUT_NODE, human_input_node),
+    (CONTEXT_SELECTOR_NODE, context_selector_node),
+    (RESULT_COLLECTOR_NODE, result_collector_node),
+    (OUTPUT_SECURITY_GATE_NODE, output_security_gate_node),
+):
+    workflow.add_node(name, traced_node(name, node))
 
-# ── Nodes ─────────────────────────────────────────────────────────────────────
-workflow.add_node(AGENT_NODE, traced_node(AGENT_NODE, agent_node))
-workflow.add_node(INPUT_SECURITY_GATE_NODE, traced_node(INPUT_SECURITY_GATE_NODE, input_security_gate_node))
-workflow.add_node(OUTPUT_SECURITY_GATE_NODE, traced_node(OUTPUT_SECURITY_GATE_NODE, output_security_gate_node))
-workflow.add_node(ARMORY_NODE, traced_node(ARMORY_NODE, armory_node))
-workflow.add_node(CHILD_AGENT_NODE, traced_node(CHILD_AGENT_NODE, child_agent_node))
-workflow.add_node(COLLECT_CHILD_NODE, traced_node(COLLECT_CHILD_NODE, collect_child_node))
-workflow.add_node(CONTEXT_SELECTOR_NODE, traced_node(CONTEXT_SELECTOR_NODE, context_selector_node))
-workflow.add_node(HUMAN_INPUT_NODE, traced_node(HUMAN_INPUT_NODE, human_input_node))
-workflow.add_node("plan_dispatcher", traced_node("plan_dispatcher", plan_dispatcher_node))
-workflow.add_node("planned_step", traced_node("planned_step", planned_step_node))
-workflow.add_node("phase_collector", traced_node("phase_collector", phase_collector_node))
-
-# ── Edges ─────────────────────────────────────────────────────────────────────
-workflow.add_edge(START, AGENT_NODE)
-
+workflow.add_edge(START, "preflight_node")
+workflow.add_conditional_edges("preflight_node", route_from_preflight, {
+    INPUT_SECURITY_GATE_NODE: INPUT_SECURITY_GATE_NODE,
+    HUMAN_INPUT_NODE: HUMAN_INPUT_NODE,
+    "preflight_node": "preflight_node", END: END,
+})
 workflow.add_edge(AGENT_NODE, INPUT_SECURITY_GATE_NODE)
-workflow.add_conditional_edges("plan_dispatcher", dispatch_phase, ["planned_step"])
-workflow.add_edge("planned_step", "phase_collector")
-workflow.add_conditional_edges("phase_collector", lambda state: INPUT_SECURITY_GATE_NODE if state.get("next_step", {}).get("action") == "finish" else ("agent_node" if not state.get("planned_phases") else "plan_dispatcher"))
+workflow.add_edge(INPUT_SECURITY_GATE_NODE, EXECUTION_DISPATCHER_NODE)
+workflow.add_conditional_edges(EXECUTION_DISPATCHER_NODE, dispatch_execution, {
+    AGENT_NODE: AGENT_NODE, ARMORY_NODE: ARMORY_NODE,
+    CHILD_AGENT_NODE: CHILD_AGENT_NODE, COLLECT_CHILD_NODE: COLLECT_CHILD_NODE,
+    HUMAN_INPUT_NODE: HUMAN_INPUT_NODE, CONTEXT_SELECTOR_NODE: CONTEXT_SELECTOR_NODE,
+    RESULT_COLLECTOR_NODE: RESULT_COLLECTOR_NODE, END: END,
+})
+for producer in (ARMORY_NODE, CHILD_AGENT_NODE, COLLECT_CHILD_NODE):
+    workflow.add_edge(producer, RESULT_COLLECTOR_NODE)
+workflow.add_conditional_edges(HUMAN_INPUT_NODE, route_from_human_input, {
+    "preflight_node": "preflight_node", RESULT_COLLECTOR_NODE: RESULT_COLLECTOR_NODE,
+    END: END,
+})
+workflow.add_edge(RESULT_COLLECTOR_NODE, OUTPUT_SECURITY_GATE_NODE)
+workflow.add_edge(OUTPUT_SECURITY_GATE_NODE, EXECUTION_DISPATCHER_NODE)
+workflow.add_edge(CONTEXT_SELECTOR_NODE, EXECUTION_DISPATCHER_NODE)
 
-workflow.add_conditional_edges(
-    INPUT_SECURITY_GATE_NODE,
-    route_from_input_gate,
-    {
-        ARMORY_NODE: ARMORY_NODE,
-        CHILD_AGENT_NODE: CHILD_AGENT_NODE,
-        COLLECT_CHILD_NODE: COLLECT_CHILD_NODE,
-        CONTEXT_SELECTOR_NODE: CONTEXT_SELECTOR_NODE,
-        HUMAN_INPUT_NODE: HUMAN_INPUT_NODE,
-        AGENT_NODE: AGENT_NODE,
-        "plan_dispatcher": "plan_dispatcher",
-        END: END,
-    },
-)
 
-workflow.add_edge(ARMORY_NODE, OUTPUT_SECURITY_GATE_NODE)
-workflow.add_edge(CHILD_AGENT_NODE, OUTPUT_SECURITY_GATE_NODE)
-workflow.add_edge(COLLECT_CHILD_NODE, OUTPUT_SECURITY_GATE_NODE)
-workflow.add_edge(CONTEXT_SELECTOR_NODE, OUTPUT_SECURITY_GATE_NODE)
-workflow.add_edge(HUMAN_INPUT_NODE, OUTPUT_SECURITY_GATE_NODE)
-workflow.add_edge(OUTPUT_SECURITY_GATE_NODE, AGENT_NODE)
+def _compile_agent_app():
+    try:
+        return workflow.compile(checkpointer=get_checkpointer())
+    except Exception:
+        logger.warning("Postgres checkpointer unavailable; compiling graph without persistence", exc_info=True)
+        return workflow.compile()
 
-# ── Compile with the Postgres checkpointer ────────────────────────────────────
-agent_app = workflow.compile(checkpointer=get_checkpointer())
+
+agent_app = _compile_agent_app()
 
 
 def run_cli() -> None:
-    """Interactive multi-turn agent CLI loop (rendered by src.cli.repl)."""
     from src.cli.repl import run_cli as repl_run_cli
 
     repl_run_cli()

@@ -21,22 +21,35 @@ v2/
 
 ## Quick Start
 
-### 1) Backend setup
+### 1) Install dependencies
 
-From `backend/`:
+Backend (from `backend/`):
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt -r api/requirements.txt
+.venv/bin/pip install -r requirements.txt
 ```
 
-### 2) Frontend setup
-
-From `frontend/`:
+Frontend (from `frontend/`):
 
 ```bash
 npm install
 ```
+
+### 2) Run first-time setup (database + test user)
+
+From repo root:
+
+```bash
+backend/.venv/bin/python scripts/firsttime_setup.py
+```
+
+This will:
+
+- print setup/install checklist reminders,
+- create/verify PostgreSQL database and schema,
+- prompt for test login credentials and create/update the user,
+- print final bring-up checklist.
 
 ### 3) Run both apps
 

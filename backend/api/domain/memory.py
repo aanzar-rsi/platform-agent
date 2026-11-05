@@ -37,6 +37,26 @@ class PreferencesUpdateRequest(BaseModel):
         return self
 
 
+class McpLoginAuthRequest(BaseModel):
+    login_url: str
+    username: str
+    password: str
+    use_agent_credentials: bool = False
+    username_field: str = "username"
+    password_field: str = "password"
+    token_field: str = "access_token"
+
+    @model_validator(mode="after")
+    def validate_login(self):
+        if (urlparse(self.login_url).scheme not in ("http", "https") or not urlparse(self.login_url).netloc):
+            raise ValueError("MCP login URL must use http or https")
+        if not self.use_agent_credentials and not self.username:
+            raise ValueError("MCP login username is required")
+        if not all(value.strip() for value in (self.username_field, self.password_field, self.token_field)):
+            raise ValueError("MCP login field names cannot be blank")
+        return self
+
+
 class McpCreateRequest(BaseModel):
     name: str
     url: str | None = None
@@ -44,8 +64,10 @@ class McpCreateRequest(BaseModel):
     transport: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    auth_headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
+    auth: McpLoginAuthRequest | None = None
 
     @model_validator(mode="after")
     def validate_transport(self):
@@ -63,6 +85,10 @@ class McpCreateRequest(BaseModel):
             raise ValueError("HTTP transport requires a URL")
         if self.command and (not all(isinstance(arg, str) for arg in self.args) or not all(isinstance(value, str) for value in self.env.values())):
             raise ValueError("Stdio arguments and environment values must be strings")
+        if (not isinstance(self.auth_headers, dict) or
+                any(not isinstance(k, str) or not isinstance(v, str) for k, v in self.auth_headers.items()) or
+                any(not k.strip() or len(v.strip()) == 0 for k, v in self.auth_headers.items())):
+            raise ValueError("auth_headers must be a map of non-empty string keys and values")
         return self
 
 
@@ -73,8 +99,10 @@ class McpUpdateRequest(BaseModel):
     transport: str | None = None
     args: list[str] | None = None
     env: dict[str, str] | None = None
+    auth_headers: dict[str, str] | None = None
     enabled: bool | None = None
     metadata: dict[str, Any] | None = None
+    auth: McpLoginAuthRequest | None = None
 
     @model_validator(mode="after")
     def validate_url(self):

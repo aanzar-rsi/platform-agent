@@ -18,7 +18,7 @@ class ChildRunner:
     """Bounded, process-local execution of durable child runs."""
 
     def __init__(self, repository: AgentRepository | None = None, *, workers: int = 8,
-                 max_children: int = 5, max_depth: int = 3, timeout: float = 120) -> None:
+                 max_children: int = 5, max_depth: int = 3, timeout: float = 600) -> None:
         from concurrent.futures import ThreadPoolExecutor
 
         self.repository = repository or AgentRepository()
@@ -129,6 +129,10 @@ class ChildRunner:
                         "child_agent_id": child.id.agent_id,
                         "policy": child.policy.as_dict(),
                         "policy_version": child.policy.version,
+                        "parent_business_permissions": (context.get("runtime") or {}).get("parent_business_permissions"),
+                        "parent_policy_version": (context.get("runtime") or {}).get("parent_policy_version"),
+                        "parent_execution_id": parent.active_execution_id,
+                        "parent_agent_id": parent.id.agent_id,
                     },
                     "child_agent_id": child.id.agent_id,
                 }
@@ -197,12 +201,9 @@ class ChildRunner:
             handle = self._handles.get(child_agent_id)
         if handle:
             try:
-                remaining = max(0, handle.deadline - time.monotonic())
-                return handle.future.result(timeout=min(remaining, self.timeout if timeout is None else timeout))
+                return handle.future.result(timeout=self.timeout if timeout is None else timeout)
             except FutureTimeout:
-                if time.monotonic() >= handle.deadline:
-                    handle.cancel_event.set()
-                raise TimeoutError("child_timeout") from None
+                raise TimeoutError("child_still_running") from None
             except Exception:
                 row = self.repository.latest_execution(child_agent_id)
                 if row and row["state"] != "completed":
@@ -236,12 +237,12 @@ class ChildRunner:
                 try:
                     self.await_child(child_id, timeout=self.timeout)
                 except TimeoutError:
-                    if self.repository.active_execution(child_id):
+                    if self.repository.active_execution(child_id) and not cancel:
                         raise
                 except Exception:
                     if not cancel:
                         continue
-                if self.repository.active_execution(child_id):
+                if not cancel and self.repository.active_execution(child_id):
                     raise TimeoutError("child_still_running")
 
     def shutdown(self) -> None:
